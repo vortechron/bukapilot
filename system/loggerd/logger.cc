@@ -160,6 +160,9 @@ bool LoggerState::next() {
   rlog.reset(new RawFile(rlog_path));
   qlog.reset(new RawFile(segment_path + "/qlog"));
 
+  segment_failed = false;
+  error_logged_once = false;
+
   // log init data & sentinel type.
   write(init_data.asBytes(), true);
   log_sentinel(this, part > 0 ? SentinelType::START_OF_SEGMENT : SentinelType::START_OF_ROUTE);
@@ -167,6 +170,16 @@ bool LoggerState::next() {
 }
 
 void LoggerState::write(uint8_t* data, size_t size, bool in_qlog) {
-  rlog->write(data, size);
-  if (in_qlog) qlog->write(data, size);
+  if (segment_failed) return;  // drop messages immediately to prevent memory explosion
+  try {
+    rlog->write(data, size);
+    if (in_qlog) qlog->write(data, size);
+  } catch (std::exception &e) {
+    segment_failed = true;
+    if (!error_logged_once) {
+      LOGE("LoggerState write failed on segment %d (%s): %s. Dropping messages until next segment.",
+           part, segment_path.c_str(), e.what());
+      error_logged_once = true;
+    }
+  }
 }

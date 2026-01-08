@@ -49,6 +49,9 @@ protected:
   std::string route_path, route_name, segment_path, lock_file;
   kj::Array<capnp::word> init_data;
   std::unique_ptr<RawFile> rlog, qlog;
+  bool segment_failed = false;    // true if write failed on this segment
+  bool error_logged_once = false; // only log the error once per segment
+
 };
 
 kj::Array<capnp::word> logger_build_init_data();
