@@ -20,7 +20,7 @@ class ConditionalExperimentalMode:
 
     self.experimental_mode = False
     self.params = Params()
-    self.cem_enabled = self.cem_enabled = bool(self.params.get("ConditionalExperimentalMode", False))
+    self.cem_enabled = bool(self.params.get("ConditionalExperimentalMode", False))
 
   def update(self, car_state, lead, model_data):
     v_ego = car_state.vEgo
