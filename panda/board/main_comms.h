@@ -12,9 +12,9 @@ int get_health_pkt(void *dat) {
   health->voltage_pkt = current_board->read_voltage_mV();
   health->current_pkt = current_board->read_current_mA();
 
-  // Use the GPIO pin to determine ignition or use a CAN based logic
-  health->ignition_line_pkt = (uint8_t)(current_board->check_ignition()) && (uint8_t)!ignore_ignition_line;
-  health->ignition_can_pkt = ignition_can;
+  // Force ignition flags ON regardless of physical ignition or CAN state
+  health->ignition_line_pkt = 1U;
+  health->ignition_can_pkt = 1U;
 
   health->controls_allowed_pkt = controls_allowed;
   health->safety_tx_blocked_pkt = safety_tx_blocked;

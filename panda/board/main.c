@@ -33,7 +33,8 @@
 // ********************* Serial debugging *********************
 
 bool check_started(void) {
-  bool started = (current_board->check_ignition() && !ignore_ignition_line) || ignition_can;
+  // Force ignition/start to always be considered ON
+  bool started = true;
   ignition_seen |= started;
   return started;
 }
