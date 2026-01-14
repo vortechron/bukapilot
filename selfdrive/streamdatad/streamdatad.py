@@ -17,6 +17,7 @@ from openpilot.system.hardware import HARDWARE
 from openpilot.selfdrive.car.fingerprints import all_known_cars
 from openpilot.common.features import Features
 from openpilot.selfdrive.streamdatad.ble_helper import BLEBridge, ChunkReceiver
+from openpilot.selfdrive.streamdatad.hotspot import Hotspot
 
 # BLE Constants
 MESSAGE_HZ = 16 # Expected message rate, must match app visualisation value
@@ -114,26 +115,6 @@ def do_reboot(state):
   if state == log.ControlsState.OpenpilotState.disabled:
     params.put_bool_nonblocking("DoReboot", True)
 
-def _systemctl(action, service=HOTSPOT_SERVICE):
-  try:
-    subprocess.run(["sudo", "systemctl", action, service], check=True)
-    cloudlog.info(f"systemctl {action} {service} succeeded")
-  except Exception as e:
-    cloudlog.error(f"systemctl {action} {service} failed: {e}")
-
-def enable_hotspot():
-  def worker():
-    _systemctl("enable", HOTSPOT_SERVICE)
-    _systemctl("start", HOTSPOT_SERVICE)
-  threading.Thread(target=worker, daemon=True).start()
-
-def disable_hotspot():
-  def worker():
-    subprocess.run(["sudo", "ip", "link", "set", "wlan1", "down"], check=False)
-    _systemctl("stop", HOTSPOT_SERVICE)
-    _systemctl("disable", HOTSPOT_SERVICE)
-  threading.Thread(target=worker, daemon=True).start()
-
 def update_dict_from_sm(target_dict, sm_subset, keys):
   try:
     c = sm_subset.to_dict()
@@ -161,6 +142,7 @@ class Streamer:
   """Handles visualisation and settings BLE streams."""
   def __init__(self, sm=None):
     self.ble = BLEBridge(local_name=BLE_NAME)
+    self.hotspot = Hotspot()
     self.sm = sm if sm else messaging.SubMaster([
       'modelV2', 'controlsState', 'radarState', 'liveCalibration',
       'driverMonitoringState', 'carState', 'longitudinalPlan',
@@ -388,9 +370,9 @@ class Streamer:
         case 'scanWifi':
           self.scan_wifi()
         case 'enableHotspot':
-          enable_hotspot()
+          self.hotspot.enable()
         case 'disableHotspot':
-          disable_hotspot()
+          self.hotspot.disable()
     except Exception as e:
       cloudlog.error(f"Apply BLE settings error: {e}")
 
