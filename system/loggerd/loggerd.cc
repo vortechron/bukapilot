@@ -21,8 +21,30 @@ struct LoggerdState {
   double last_rotate_tms = 0.;      // last rotate time in ms
 };
 
+struct RemoteEncoder {
+  std::unique_ptr<VideoWriter> writer;
+  int encoderd_segment_offset;
+  int current_segment = -1;
+  std::vector<Message *> q;
+  int dropped_frames = 0;
+  bool recording = false;
+  bool marked_ready_to_rotate = false;
+  bool seen_first_packet = false;
+};
+
+std::unordered_map<SubSocket*, RemoteEncoder> remote_encoders;
+
 void logger_rotate(LoggerdState *s) {
-  bool ret =s->logger.next();
+  // free queued messages and reset writers to prevent memory leak
+  for (auto &[_, re] : remote_encoders) {
+    for (auto &m : re.q) delete m;
+    re.q.clear();
+    if (re.writer) re.writer.reset();
+    re.recording = false;
+    re.marked_ready_to_rotate = false;
+  }
+
+  bool ret = s->logger.next();
   assert(ret);
   s->ready_to_rotate = 0;
   s->last_rotate_tms = millis_since_boot();
@@ -53,17 +75,6 @@ void rotate_if_needed(LoggerdState *s) {
   }
 }
 
-struct RemoteEncoder {
-  std::unique_ptr<VideoWriter> writer;
-  int encoderd_segment_offset;
-  int current_segment = -1;
-  std::vector<Message *> q;
-  int dropped_frames = 0;
-  bool recording = false;
-  bool marked_ready_to_rotate = false;
-  bool seen_first_packet = false;
-};
-
 int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct RemoteEncoder &re, const EncoderInfo &encoder_info) {
   int bytes_count = 0;
 
@@ -87,9 +98,11 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
 
     // if this is a new segment, we close any possible old segments, move to the new, and process any queued packets
     if (re.current_segment != s->logger.segment()) {
-      if (re.recording) {
-        re.writer.reset();
-        re.recording = false;
+      for (auto &[_, r] : remote_encoders) {
+        if (r.recording) {
+          r.writer.reset();
+          r.recording = false;
+        }
       }
       re.current_segment = s->logger.segment();
       re.marked_ready_to_rotate = false;
@@ -125,9 +138,11 @@ int handle_encoder_msg(LoggerdState *s, Message *msg, std::string &name, struct 
       } else {
         // this is a sad case when we aren't recording, but don't have an iframe
         // nothing we can do but drop the frame
-        delete msg;
-        ++re.dropped_frames;
-        return bytes_count;
+        if (!(flags & V4L2_BUF_FLAG_KEYFRAME)) {
+          delete msg;
+          ++re.dropped_frames;
+          return bytes_count;
+        }
       }
     }
 
@@ -205,7 +220,6 @@ void loggerd_thread() {
     bool encoder, user_flag;
   } ServiceState;
   std::unordered_map<SubSocket*, ServiceState> service_state;
-  std::unordered_map<SubSocket*, struct RemoteEncoder> remote_encoders;
 
   std::unique_ptr<Context> ctx(Context::create());
   std::unique_ptr<Poller> poller(Poller::create());
