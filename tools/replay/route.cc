@@ -1,6 +1,7 @@
 #include "tools/replay/route.h"
 
 #include <array>
+#include <cstdlib>
 #include <filesystem>
 #include <regex>
 
@@ -63,9 +64,47 @@ bool Route::load() {
   return true;
 }
 
+bool Route::loadFromKommuFallback() {
+  const std::string base = "https://web.kommu.ai/depot/upload/" + route_.dongle_id;
+  const std::string prefix = route_.dongle_id + "---" + route_.timestamp + "--";
+  std::string temp_dir = "/tmp";
+  const char *tmp = std::getenv("TMPDIR");
+  if (tmp && tmp[0]) temp_dir = tmp;
+
+  struct FileSpec {
+    const char *suffix;
+    const char *local_suffix;
+  };
+  const FileSpec files[] = {
+      {"rlog.bz2", "rlog"},
+      {"qlog.bz2", "qlog"},
+      {"qcamera.ts", "qcamera"},
+      {"fcamera.hevc", "fcamera"},
+      {"dcamera.hevc", "dcamera"},
+      {"ecamera.hevc", "ecamera"},
+  };
+
+  for (int i = 0; i < 100; ++i) {
+    bool has_any = false;
+    for (const auto &f : files) {
+      const std::string url = base + "/" + prefix + std::to_string(i) + "---" + f.suffix;
+      const std::string local_path = temp_dir + "/" + prefix + std::to_string(i) + "---" + f.local_suffix;
+      if (httpDownload(url, local_path)) {
+        addFileToSegment(i, local_path);
+        has_any = true;
+      }
+    }
+    if (!has_any) {
+      break;
+    }
+  }
+
+  return !segments_.empty();
+}
+
 bool Route::loadSegments() {
   if (!auto_source_) {
-    bool ret = data_dir_.empty() ? loadFromServer() : loadFromLocal();
+    bool ret = data_dir_.empty() ? (loadFromServer() || loadFromKommuFallback()) : loadFromLocal();
     if (ret) {
       // Trim segments
       if (route_.begin_segment > 0) {
