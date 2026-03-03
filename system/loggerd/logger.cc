@@ -1,5 +1,6 @@
 #include "system/loggerd/logger.h"
 
+#include <ctime>
 #include <fstream>
 #include <map>
 #include <vector>
@@ -118,6 +119,16 @@ std::string logger_get_identifier(std::string key) {
   return util::string_format("%08x--%s", cnt, ss.str().c_str());
 }
 
+std::string logger_get_route_name() {
+  // Datetime format: YYYY-MM-DD--HH-MM-SS (matches comma/bukapilot style)
+  time_t now = time(nullptr);
+  struct tm tm;
+  gmtime_r(&now, &tm);
+  char buf[32];
+  strftime(buf, sizeof(buf), "%Y-%m-%d--%H-%M-%S", &tm);
+  return std::string(buf);
+}
+
 std::string zstd_decompress(const std::string &in) {
   ZSTD_DCtx *dctx = ZSTD_createDCtx();
   assert(dctx != nullptr);
@@ -163,9 +174,16 @@ static void log_sentinel(LoggerState *log, SentinelType type, int exit_signal = 
 }
 
 LoggerState::LoggerState(const std::string &log_root) {
-  route_name = logger_get_identifier("RouteCount");
+  route_name = logger_get_route_name();
   route_path = log_root + "/" + route_name;
   init_data = logger_build_init_data();
+
+  // Increment RouteCount for updated.py compatibility
+  Params params;
+  std::string cnt_str = params.get("RouteCount");
+  uint32_t cnt = 0;
+  try { cnt = std::stoul(cnt_str); } catch (...) {}
+  params.put("RouteCount", std::to_string(cnt + 1));
 }
 
 LoggerState::~LoggerState() {

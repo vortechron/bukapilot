@@ -3,7 +3,6 @@ from openpilot.common.params import Params
 FEATURE_DELIMITER = ', '
 
 FEATURES = {
-  "clear-code",
   "ignore-dm",
   "lks-tactile",
   "stock-acc",

@@ -375,9 +375,14 @@ class Uploader:
     d = self.next_file_to_upload(metered)
     if d is not None:
       name, key, fn = d
-      # qlogs and bootlogs need to be compressed before uploading
-      if key.endswith(('qlog', 'rlog')) or (key.startswith('boot/') and not key.endswith('.zst')):
+      # Keep current zstd naming for driving logs, but use legacy boot key naming for kommu backend.
+      if key.endswith(('qlog', 'rlog')):
         key += ".zst"
+      elif key.startswith('boot/'):
+        if key.endswith('.zst'):
+          key = key[:-4] + '.bz2'
+        elif not key.endswith('.bz2'):
+          key += ".bz2"
       return self.upload(name, key, fn, network_type, metered)
 
     return None

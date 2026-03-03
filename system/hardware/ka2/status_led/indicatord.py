@@ -2,10 +2,10 @@
 """
 Indicator LED Service (indicatord) — state-change only, uses process preemption for blink
 
+- Subscribes to selfdriveState (active, alertType) and driverCameraState (integLines for brightness).
 - Only updates LEDs when (color, mode, rate) changes.
-- Brightness computed only at those times.
 - Blink runs "indefinitely" (duration=600s) but is preempted instantly when the state changes.
-- Not-running fallback to solid YELLOW if CS stalls.
+- Not-running fallback to solid YELLOW if selfdriveState stalls or is unavailable.
 """
 
 import time
@@ -27,7 +27,7 @@ class AlertLEDService:
         integ_min: int = 100,
         integ_max: int = 892,
         not_running_brightness: str = "200",
-        topic_cs: str = "controlsState",
+        topic_cs: str = "selfdriveState",
         topic_dc: str = "driverCameraState",
         base_poll_ms: int = 500,
         overrides: Optional[Dict[str, Tuple[str, str, Optional[str]]]] = None,
@@ -110,30 +110,68 @@ class AlertLEDService:
                     if self.on_change:
                         self._safe_on_change(False, "not_running", state)
 
-    # mapping
+    # mapping: alert_type format is "eventName/eventType" (e.g. cameraMalfunction/permanent, wrongGear/noEntry)
+    # Event types (ET): enable, noEntry, warning, userDisable, softDisable, immediateDisable, permanent
+    #
+    # LED behavior summary:
+    #   GREEN solid:  enable (engage), active with no alert
+    #   RED blink:    immediateDisable when active (critical take-over)
+    #   RED solid:    immediateDisable when not active, critical permanent (malfunction, faulted, etc.)
+    #   ORANGE blink: softDisable, userDisable, warning (active or not)
+    #   ORANGE solid: noEntry, softDisable when not active, warning permanent (dashcam, etc.)
+    #   BLUE solid:   startup events, userDisable when not active, low-priority permanent, preEnable, overrides
+    #   YELLOW solid: not_running fallback (selfdriveState unavailable)
     def _classify_key(self, alert_type: str, active: bool) -> Tuple[str, str, Optional[str]]:
-        tl = (alert_type or "").lower()
+        raw = (alert_type or "").strip()
+        tl = raw.lower()
+        parts = tl.split("/", 1)
+        event_name = parts[0] if parts else ""
+        event_type = parts[1] if len(parts) > 1 else ""
+
         if tl in self.overrides:
             color, mode, rate = self.overrides[tl]
             return (color, mode, rate)
+
+        # Keep all startup alerts consistently blue (e.g. startup/noEntry, startup/permanent).
+        if "startup" in event_name:
+            return ("BLUE", "solid", None)
+
+        # engage (buttonEnable/enable, pcmEnable/enable) — always green, matches soundd engage.wav
+        if event_type == "enable":
+            return ("GREEN", "solid", None)
+
+        # --- Active (openpilot engaged) ---
         if active:
-            if "immediate" in tl:
+            if event_type == "immediatedisable":
                 return ("RED", "blink", "fast")
-            if "soft" in tl or "warning" in tl:
+            if event_type in ("softdisable", "userdisable"):
+                return ("ORANGE", "blink", "fast")
+            if event_type == "warning":
                 return ("ORANGE", "blink", "fast")
             return ("GREEN", "solid", None)
-        if "noentry" in tl:
+
+        # --- Not active ---
+        if event_type == "immediatedisable":
+            return ("RED", "solid", None)
+        if event_type in ("noentry", "softdisable"):
             return ("ORANGE", "solid", None)
-        if "permanent" in tl:
-            if "malfunction" in tl or "error" in tl or "out" in tl or "faulted" in tl:
-              return ("RED", "solid", None)
-            if "dashcam" in tl or "invalid" in tl or "unrecognized" in tl or \
-            "cameraframerate" in tl or "unavailable" in tl or \
-            "calibration" in tl or "missing" in tl or "disabled" in tl:
-              return ("ORANGE", "solid", None)
-        # TODO: Remove after done debugging
-        if "gps" in tl:
-            return ("CYAN", "solid", None)
+        if event_type == "warning":
+            return ("ORANGE", "blink", "fast")
+        if event_type == "userdisable":
+            return ("BLUE", "solid", None)
+
+        # permanent: classify by event name (matches events.py EVENTS)
+        if event_type == "permanent":
+            if any(x in event_name for x in ("malfunction", "faulted", "error", "overheat", "outofspace",
+                                             "relay", "accfaulted", "steerunavailable", "canerror", "canbus",
+                                             "vehiclesensors", "sensorinvalid", "calibrationinvalid")):
+                return ("RED", "solid", None)
+            if any(x in event_name for x in ("dashcam", "calibration", "locationd", "paramsd",
+                                             "unrecognized", "cameraframerate", "fan")):
+                return ("ORANGE", "solid", None)
+            return ("BLUE", "solid", None)
+
+        # enable, preEnable, overrideLateral, overrideLongitudinal, or unknown
         return ("BLUE", "solid", None)
 
     def _map_integ_to_brightness_inverse(self, integ: int) -> int:
@@ -160,13 +198,12 @@ class AlertLEDService:
         except Exception:
             pass
 
-def main():
-    svc = AlertLEDService()
-    svc.run_forever()
-
-if __name__ == "__main__":
-    svc = AlertLEDService(debug=False)
+def main(*, debug: bool = False):
+    svc = AlertLEDService(debug=debug)
     try:
         svc.run_forever()
     except KeyboardInterrupt:
         svc.stop()
+
+if __name__ == "__main__":
+    main(debug=False)

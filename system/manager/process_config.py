@@ -78,7 +78,7 @@ procs = [
   PythonProcess("journald", "system.journald", only_onroad, platform.system() != "Darwin"),
   PythonProcess("micd", "system.micd", iscar),
   PythonProcess("timed", "system.timed", always_run, enabled=not PC),
-  PythonProcess("streamdatad", "selfdrive.streamdatad.streamdatad", always_run, enabled=not PC),
+  PythonProcess("appbridged", "selfdrive.appbridged.appbridged", always_run, enabled=not PC),
   PythonProcess("sdformatterd", "system.hardware.ka2.formatdevice", format_sd, enabled=not PC),
   PythonProcess("indicatord", "system.hardware.ka2.status_led.indicatord", always_run, enabled=KA2),
 

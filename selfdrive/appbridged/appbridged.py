@@ -16,7 +16,7 @@ from openpilot.common.params import Params
 from openpilot.system.hardware import HARDWARE
 from opendbc.car.car_helpers import supported_cars
 from openpilot.common.features import Features
-from openpilot.selfdrive.streamdatad.ble_helper import BLEBridge, ChunkReceiver
+from openpilot.selfdrive.appbridged.ble_helper import BLEBridge, ChunkReceiver
 from system.hardware.ka2.hardware import Ka2
 
 # BLE Constants
@@ -172,8 +172,8 @@ class Streamer:
   def __init__(self, sm=None):
     self.ble = BLEBridge(local_name=BLE_NAME)
     self.sm = sm if sm else messaging.SubMaster([
-      'modelV2', 'controlsState', 'selfdriveState', 'radarState', 'liveCalibration',
-      'driverMonitoringState', 'carState', 'longitudinalPlan',
+      'modelV2', 'selfdriveState', 'radarState', 'liveCalibration',
+      'driverMonitoringState', 'carState',
       'uploaderState'
     ])
     self.rk = Ratekeeper(MESSAGE_HZ) # Ratekeeper for loop
@@ -267,14 +267,14 @@ class Streamer:
     data["m"] = is_metric
     data['d'] = DONGLE_ID
     update_dict_from_sm(data, sm['selfdriveState'], ["enabled", "state", "experimentalMode",
-                                                     "alertText1", "alertText2", "alertStatus", "alertSize"])
+                                                     "alertText1", "alertText2", "alertStatus",
+                                                     "alertSize", "personality"])
     rd = sm['radarState'].to_dict()
     data["o"] = extract_lead(rd, "leadOne")
     data["t"] = extract_lead(rd, "leadTwo")
     update_dict_from_sm(data, sm['driverMonitoringState'], ["isActiveMode"])
     data["h"] = sm['liveCalibration'].to_dict().get("height", [None])[0]
     update_dict_from_sm(data, sm['carState'], ["vEgoCluster", "vCruiseCluster"])
-    update_dict_from_sm(data, sm['longitudinalPlan'], ["personality"])
     data = quantize(data)
     try:
       self.ble.chunk_and_send(CHANNEL_VISUALISATION, msgpack.packb(data))
@@ -415,7 +415,7 @@ class Streamer:
     """Check for dongle ID and send channel message for received messages"""
     c, p = msg
     if len(p) > 128 * 1024:  # Reject oversized payloads before unpack (avoid native alloc/heap issues)
-      cloudlog.error("streamdatad: dropped oversized BLE message")
+      cloudlog.error("appbridged: dropped oversized BLE message")
       return None
     try:
       m = msgpack.unpackb(p)

@@ -80,9 +80,8 @@ class BLEBridge:
 
   def chunk_and_send(self, channel: int, payload: bytes, CHUNK_SIZE=240):
     """Split payload into BLE chunks and send."""
-    # Track message IDs per channel
     cnts = getattr(self, "_counters", setattr(self, "_counters", {}) or self._counters)
-    cnts[channel] = msg_id = cnts.get(channel, 0) % 255 + 1 # Message ID cycles from 1 to 255
+    cnts[channel] = msg_id = cnts.get(channel, 0) % 255 + 1
     view = memoryview(payload)
     for seg_idx in range(total_segments := -(-len(payload) // CHUNK_SIZE)):
       offset = seg_idx * CHUNK_SIZE
@@ -93,12 +92,11 @@ class ChunkReceiver:
   def __init__(self, ble):
     self.ble = ble
     self.lock = threading.Lock()
-    self.active_messages = {}  # { (channel, msg_id): [received_chunks, total_segments, last_time] }
+    self.active_messages = {}
     self.completed_messages = SimpleQueue()
     threading.Thread(target=self._receive_loop, daemon=True).start()
 
   def _receive_loop(self):
-    """Continuously read BLE packets, assemble chunks, drop timed-out messages."""
     while True:
       processed_packet = False
       if self.ble.connected:
@@ -113,7 +111,7 @@ class ChunkReceiver:
           if seg_idx >= total_segments:
             continue
           key = (channel, msg_id)
-          now = monotonic() # assign once per packet
+          now = monotonic()
           with self.lock:
             entry = self.active_messages.get(key)
             if entry is None:
@@ -130,12 +128,11 @@ class ChunkReceiver:
               del self.active_messages[key]
 
             for key2, (chunks, total, last_time) in list(self.active_messages.items()):
-              if now - last_time > CHUNK_TIMEOUT: # Drop timed-out messages
+              if now - last_time > CHUNK_TIMEOUT:
                 del self.active_messages[key2]
 
       if not processed_packet:
-        sleep(0.01) # Small sleep only if no packets to process
+        sleep(0.01)
 
   def get_message(self):
-    """Return the next completed message if available."""
     return q.get() if not (q := self.completed_messages).empty() else None
