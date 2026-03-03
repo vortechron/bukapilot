@@ -6,6 +6,7 @@
 
 #include "cereal/messaging/messaging.h"
 #include "common/util.h"
+#include "common/timing.h"
 #include "system/hardware/hw.h"
 #include "system/loggerd/zstd_writer.h"
 

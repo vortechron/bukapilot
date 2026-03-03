@@ -12,15 +12,22 @@ UNREGISTERED_DONGLE_ID = "UnregisteredDevice"
 
 def is_registered_device() -> bool:
   dongle = Params().get("DongleId")
-  return dongle not in (None, UNREGISTERED_DONGLE_ID)
+  if dongle is None:
+    return False
+  dongle = dongle.decode("utf8") if isinstance(dongle, bytes) else dongle
+  return dongle != UNREGISTERED_DONGLE_ID
 
 def register(show_spinner=False) -> str | None:
   params = Params()
 
-  IMEI = params.get("IMEI", encoding='utf8')
-  HardwareSerial = params.get("HardwareSerial", encoding='utf8')
-  dongle_id: str | None = params.get("DongleId", encoding='utf8')
-  needs_registration = None in (IMEI, HardwareSerial, dongle_id)
+  def _str(val):
+    if val is None:
+      return None
+    return val.decode("utf8") if isinstance(val, bytes) else val
+
+  dongle_id = _str(params.get("DongleId"))
+  # Only DongleId is used for "already registered"; IMEI/HardwareSerial are written after first registration
+  needs_registration = dongle_id is None or dongle_id == UNREGISTERED_DONGLE_ID
 
   if needs_registration:
     if show_spinner:
@@ -70,7 +77,7 @@ def register(show_spinner=False) -> str | None:
 
   if dongle_id:
     params.put("DongleId", dongle_id)
-    set_offroad_alert("Offroad_UnofficialHardware", (dongle_id == UNREGISTERED_DONGLE_ID) and not PC)
+    set_offroad_alert("Offroad_UnregisteredHardware", (dongle_id == UNREGISTERED_DONGLE_ID) and not PC)
   return dongle_id
 
 

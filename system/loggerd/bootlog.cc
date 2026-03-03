@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
   file.write(build_boot_log().asBytes());
 
   // Write out bootlog param to match routes with bootlog
-  Params().put("CurrentBootlog", id.c_str());
+  Params().put("CurrentBootlog", path.c_str());
 
   return 0;
 }

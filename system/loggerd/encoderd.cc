@@ -3,9 +3,12 @@
 #include "system/loggerd/loggerd.h"
 #include "system/loggerd/encoder/jpeg_encoder.h"
 
-#ifdef __TICI__
+#if defined(__TICI__) || defined(QCOM2)
 #include "system/loggerd/encoder/v4l_encoder.h"
 #define Encoder V4LEncoder
+#elif defined(RK3588)
+#include "system/loggerd/encoder/mpp_encoder.h"
+#define Encoder MppEncoder
 #else
 #include "system/loggerd/encoder/ffmpeg_encoder.h"
 #define Encoder FfmpegEncoder
