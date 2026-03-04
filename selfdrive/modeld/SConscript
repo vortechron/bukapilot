@@ -103,15 +103,16 @@ def tg_compile(flags, model_name):
     f'{pythonpath_string} {flags} python3 {Dir("#tinygrad_repo").abspath}/examples/openpilot/compile3.py {fn}.onnx {fn}_tinygrad.pkl'
   )
 
-# Compile small models (tinygrad). Skipped for KA2: we use RKNN only (no tinygrad/OpenCL path).
+# Compile small models (tinygrad). Keep KA2 tinygrad/OpenCL artifacts optional via env flag.
 # Performance tune (main-repo only): defaults for larch64. Override with VISION_JITBEAM=0, etc.
-if device != 'KA2':
+force_ka2_tinygrad = os.environ.get('FORCE_KA2_TINYGRAD', '0') == '1'
+if device != 'KA2' or force_ka2_tinygrad:
   _vision_jit_batch = os.environ.get('VISION_JIT_BATCH_SIZE', '0')
   _vision_nolocals = os.environ.get('VISION_NOLOCALS', '1')
   _vision_beam_local = os.environ.get('VISION_BEAM_LOCAL_MAX', '')
   _vision_mali_local_small = os.environ.get('VISION_MALI_LOCAL_SMALL', '0')
   _mali_profile = os.environ.get('MALI_PROFILE', '0')
-  _vision_jitbeam = os.environ.get('VISION_JITBEAM', '1')  # BEAM at capture for vision (Tier 1 tune)
+  _vision_jitbeam = os.environ.get('VISION_JITBEAM', '0')  # BEAM at capture for vision (Tier 1 tune)
   _policy_image = os.environ.get('POLICY_IMAGE', '1')
   _vision_image = os.environ.get('VISION_IMAGE', '1')
   _vision_wino = os.environ.get('VISION_WINO', '1' if os.environ.get('VISION_IMAGE') == '0' else '0')

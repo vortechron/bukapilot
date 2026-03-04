@@ -3,6 +3,10 @@
 #include "selfdrive/modeld/runners/dmonitoring_rknnmodel.h"
 
 #include <assert.h>
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -22,7 +26,50 @@ struct DMonitoringRKNNModel::ModelCtx {
   std::vector<rknn_output> rknn_outputs;
   std::vector<std::vector<half>> input_bufs;
   rknn_perf_run perf_run = {};
+  // Cached indices to avoid per-frame name lookup.
+  int idx_img = -1;
+  int idx_calib = -1;
 };
+
+namespace {
+std::string lower_copy(const char *s) {
+  std::string out = s ? s : "";
+  std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+  return out;
+}
+
+const std::array<half, 256> &u8_to_half_lut() {
+  static const std::array<half, 256> lut = [] {
+    std::array<half, 256> t = {};
+    for (int i = 0; i < 256; i++) t[i] = float_to_half(static_cast<float>(i));
+    return t;
+  }();
+  return lut;
+}
+
+int find_input_index(const std::vector<rknn_tensor_attr> &attrs, uint32_t n_input, const std::vector<std::string> &needles) {
+  // Pass 1: exact name match.
+  for (uint32_t i = 0; i < n_input; i++) {
+    const std::string n = lower_copy(attrs[i].name);
+    for (const auto &needle : needles) {
+      if (n == needle) {
+        return static_cast<int>(i);
+      }
+    }
+  }
+  // Pass 2: substring fallback for variant names.
+  for (uint32_t i = 0; i < n_input; i++) {
+    const std::string n = lower_copy(attrs[i].name);
+    for (const auto &needle : needles) {
+      if (n.find(needle) != std::string::npos) {
+        return static_cast<int>(i);
+      }
+    }
+  }
+  return -1;
+}
+
+}  // namespace
 
 void DMonitoringRKNNModel::load_model(const std::string& path, DMonitoringRKNNModel::ModelCtx* out) {
   std::string model_data = util::read_file(path);
@@ -57,7 +104,8 @@ void DMonitoringRKNNModel::load_model(const std::string& path, DMonitoringRKNNMo
   for (uint32_t i = 0; i < out->io_num.n_input; i++) {
     out->rknn_inputs[i].index = i;
     out->rknn_inputs[i].fmt = out->input_attrs[i].fmt;
-    out->rknn_inputs[i].pass_through = 1;
+    // Match Python RKNN "safe default" path: no explicit pass-through behavior.
+    out->rknn_inputs[i].pass_through = 0;
     out->rknn_inputs[i].type = RKNN_TENSOR_FLOAT16;
     out->rknn_inputs[i].size = out->input_attrs[i].size;
     out->rknn_inputs[i].buf = out->input_bufs[i].data();
@@ -75,6 +123,10 @@ DMonitoringRKNNModel::DMonitoringRKNNModel(const std::string& model_path, float*
       output_(output),
       run_us_(0) {
   load_model(model_path, ctx_);
+  ctx_->idx_img = find_input_index(ctx_->input_attrs, ctx_->io_num.n_input, {"input_img", "img"});
+  ctx_->idx_calib = find_input_index(ctx_->input_attrs, ctx_->io_num.n_input, {"calib"});
+  if (ctx_->idx_img < 0) ctx_->idx_img = 0;
+  if (ctx_->idx_calib < 0 || ctx_->idx_calib == ctx_->idx_img) ctx_->idx_calib = (ctx_->idx_img == 0) ? 1 : 0;
   assert(ctx_->io_num.n_input >= 2 && ctx_->io_num.n_output == 1);
   ctx_->rknn_outputs[0].buf = output_;
   ctx_->rknn_outputs[0].size = ctx_->output_attrs[0].n_elems * sizeof(float);
@@ -93,15 +145,18 @@ DMonitoringRKNNModel::~DMonitoringRKNNModel() {
 void DMonitoringRKNNModel::run(const unsigned char* input_img, const float* calib) {
   ModelCtx* m = ctx_;
   assert(m->io_num.n_input >= 2);
-  const uint32_t n_img = m->input_attrs[0].n_elems;
-  const uint32_t n_calib = m->input_attrs[1].n_elems;
-  half* buf0 = m->input_bufs[0].data();
-  half* buf1 = m->input_bufs[1].data();
+  const int idx_img = m->idx_img;
+  const int idx_calib = m->idx_calib;
+
+  const uint32_t n_img = m->input_attrs[idx_img].n_elems;
+  const uint32_t n_calib = m->input_attrs[idx_calib].n_elems;
+  half* buf_img = m->input_bufs[idx_img].data();
+  half* buf_calib = m->input_bufs[idx_calib].data();
+  const auto &lut = u8_to_half_lut();
   for (uint32_t i = 0; i < n_img; i++) {
-    float v = input_img[i] / 255.0f;
-    buf0[i] = float_to_half(v);
+    buf_img[i] = lut[input_img[i]];
   }
-  float_to_half_array(const_cast<float*>(calib), buf1, n_calib);
+  float_to_half_array(const_cast<float*>(calib), buf_calib, n_calib);
   RKNN_CHECK(rknn_inputs_set(m->ctx, m->io_num.n_input, m->rknn_inputs.data()));
   RKNN_CHECK(rknn_run(m->ctx, NULL));
   RKNN_CHECK(rknn_outputs_get(m->ctx, m->io_num.n_output, m->rknn_outputs.data(), NULL));

@@ -22,7 +22,7 @@ class DrivingRKNNModel {
                    float* policy_output);
   ~DrivingRKNNModel();
 
-  /** Run vision model. img and big_img are uint8 NCHW (1,12,128,256). Converted to float16 (/255) internally. */
+  /** Run vision model. img and big_img are uint8 NCHW (1,12,128,256). Converted to float16 (raw 0..255) internally. */
   void run_vision(const unsigned char* img, const unsigned char* big_img);
 
   /** Run policy model. All inputs float32; converted to float16 internally. */

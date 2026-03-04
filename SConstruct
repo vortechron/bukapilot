@@ -225,8 +225,8 @@ SConscript(['third_party/SConscript'])
 
 SConscript(['selfdrive/SConscript'])
 
-# Replay/cabana are PC/dev tools; not built for KA2.
-if Dir('#tools/cabana/').exists() and GetOption('extras') and device != 'KA2':
+# Replay is useful for KA2 debugging as well; keep cabana limited by arch.
+if Dir('#tools/cabana/').exists() and GetOption('extras'):
   SConscript(['tools/replay/SConscript'])
   if arch != "larch64":
     SConscript(['tools/cabana/SConscript'])

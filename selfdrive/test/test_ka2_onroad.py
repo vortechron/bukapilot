@@ -75,7 +75,7 @@ PROCS.update({
   },
   "ka2": {
     "./boardd": 2.0,
-    "selfdrive.streamdatad.streamdatad": 2.5,
+    "selfdrive.appbridged.appbridged": 2.5,
     "system.hardware.ka2.status_led.indicatord": 7.5,
     "system.qcomgpsd.qcomgpsd": 1.0,
   }

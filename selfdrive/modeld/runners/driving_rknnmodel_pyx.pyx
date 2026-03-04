@@ -36,18 +36,23 @@ cdef class DrivingRKNNRunnerCpp:
 
     def run_vision(self, np.ndarray img, np.ndarray big_img):
         """img, big_img: uint8 numpy arrays (1,12,128,256) or flat."""
-        cdef unsigned char[::1] img_flat = np.ascontiguousarray(img).reshape(-1).astype(np.uint8)
-        cdef unsigned char[::1] big_flat = np.ascontiguousarray(big_img).reshape(-1).astype(np.uint8)
+        cdef np.ndarray[np.uint8_t, ndim=1, mode='c'] img_flat_arr = np.asarray(img, dtype=np.uint8, order='C').reshape(-1)
+        cdef np.ndarray[np.uint8_t, ndim=1, mode='c'] big_flat_arr = np.asarray(big_img, dtype=np.uint8, order='C').reshape(-1)
+        cdef unsigned char[::1] img_flat = img_flat_arr
+        cdef unsigned char[::1] big_flat = big_flat_arr
         self._model.run_vision(&img_flat[0], &big_flat[0])
-        return np.asarray(self._vision_out).copy()
+        return np.asarray(self._vision_out)
 
     def run_policy(self, np.ndarray desire_pulse, np.ndarray traffic_convention, np.ndarray features_buffer):
         """All float32 numpy arrays."""
-        cdef float[::1] dp = np.ascontiguousarray(desire_pulse, dtype=np.float32).reshape(-1)
-        cdef float[::1] tc = np.ascontiguousarray(traffic_convention, dtype=np.float32).reshape(-1)
-        cdef float[::1] fb = np.ascontiguousarray(features_buffer, dtype=np.float32).reshape(-1)
+        cdef np.ndarray[np.float32_t, ndim=1, mode='c'] dp_arr = np.asarray(desire_pulse, dtype=np.float32, order='C').reshape(-1)
+        cdef np.ndarray[np.float32_t, ndim=1, mode='c'] tc_arr = np.asarray(traffic_convention, dtype=np.float32, order='C').reshape(-1)
+        cdef np.ndarray[np.float32_t, ndim=1, mode='c'] fb_arr = np.asarray(features_buffer, dtype=np.float32, order='C').reshape(-1)
+        cdef float[::1] dp = dp_arr
+        cdef float[::1] tc = tc_arr
+        cdef float[::1] fb = fb_arr
         self._model.run_policy(&dp[0], &tc[0], &fb[0])
-        return np.asarray(self._policy_out).copy()
+        return np.asarray(self._policy_out)
 
     def get_vision_run_us(self):
         return self._model.get_vision_run_us()

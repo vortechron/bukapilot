@@ -3,6 +3,10 @@
 #include "selfdrive/modeld/runners/driving_rknnmodel.h"
 
 #include <assert.h>
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <vector>
@@ -22,7 +26,123 @@ struct DrivingRKNNModel::ModelCtx {
   std::vector<rknn_output> rknn_outputs;
   std::vector<std::vector<half>> input_bufs;  // float16 input buffers
   rknn_perf_run perf_run = {};
+  // Cached input indices to avoid per-frame string lookup.
+  int idx_img = -1;
+  int idx_big = -1;
+  int idx_dp = -1;
+  int idx_tc = -1;
+  int idx_fb = -1;
 };
+
+namespace {
+rknn_core_mask parse_driving_core_mask() {
+  // Stability default: pin driving model to NPU core 2.
+  // Can override with RKNN_DRIVING_CORE_MASK=0|1|2|0_1|0_1_2
+  std::string v = std::getenv("RKNN_DRIVING_CORE_MASK") ? std::getenv("RKNN_DRIVING_CORE_MASK") : "2";
+  if (v == "0") return RKNN_NPU_CORE_0;
+  if (v == "1") return RKNN_NPU_CORE_1;
+  if (v == "2") return RKNN_NPU_CORE_2;
+  if (v == "0_1") return RKNN_NPU_CORE_0_1;
+  if (v == "0_1_2") return RKNN_NPU_CORE_0_1_2;
+  return RKNN_NPU_CORE_0_1_2;
+}
+
+std::string lower_copy(const char *s) {
+  std::string out = s ? s : "";
+  std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+  return out;
+}
+
+int find_input_index(const std::vector<rknn_tensor_attr> &attrs, uint32_t n_input, const std::vector<std::string> &needles) {
+  // Pass 1: exact name match.
+  for (uint32_t i = 0; i < n_input; i++) {
+    const std::string n = lower_copy(attrs[i].name);
+    for (const auto &needle : needles) {
+      if (n == needle) {
+        return static_cast<int>(i);
+      }
+    }
+  }
+  // Pass 2: substring fallback for variant names.
+  for (uint32_t i = 0; i < n_input; i++) {
+    const std::string n = lower_copy(attrs[i].name);
+    for (const auto &needle : needles) {
+      if (n.find(needle) != std::string::npos) {
+        return static_cast<int>(i);
+      }
+    }
+  }
+  return -1;
+}
+
+const std::array<half, 256> &u8_to_half_lut() {
+  static const std::array<half, 256> lut = [] {
+    std::array<half, 256> t = {};
+    for (int i = 0; i < 256; i++) t[i] = float_to_half(static_cast<float>(i));
+    return t;
+  }();
+  return lut;
+}
+
+void fill_vision_input_half_from_u8(const unsigned char* src_nchw_u8, const rknn_tensor_attr &dst_attr, half* dst_half) {
+  // Modeld produces NCHW packed tensors (1,12,128,256).
+  // Convert directly to model-native layout without temporary allocations.
+  constexpr int N = 1;
+  constexpr int C = 12;
+  constexpr int H = 128;
+  constexpr int W = 256;
+  constexpr int HW = H * W;
+  constexpr int n = N * C * H * W;
+  const auto &lut = u8_to_half_lut();
+
+  if (dst_attr.fmt == RKNN_TENSOR_NCHW) {
+    // Unrolled hot loop: uint8 -> fp16 LUT conversion.
+    int i = 0;
+    for (; i + 8 <= n; i += 8) {
+      dst_half[i + 0] = lut[src_nchw_u8[i + 0]];
+      dst_half[i + 1] = lut[src_nchw_u8[i + 1]];
+      dst_half[i + 2] = lut[src_nchw_u8[i + 2]];
+      dst_half[i + 3] = lut[src_nchw_u8[i + 3]];
+      dst_half[i + 4] = lut[src_nchw_u8[i + 4]];
+      dst_half[i + 5] = lut[src_nchw_u8[i + 5]];
+      dst_half[i + 6] = lut[src_nchw_u8[i + 6]];
+      dst_half[i + 7] = lut[src_nchw_u8[i + 7]];
+    }
+    for (; i < n; i++) dst_half[i] = lut[src_nchw_u8[i]];
+    return;
+  }
+
+  if (dst_attr.fmt == RKNN_TENSOR_NHWC) {
+    // NCHW -> NHWC (N=1): [C,H,W] -> [H,W,C]
+    for (int h = 0; h < H; h++) {
+      for (int w = 0; w < W; w++) {
+        const int dst_base = (h * W + w) * C;
+        const int src_hw = h * W + w;
+        // Manual C=12 unroll to minimize loop overhead in the hot path.
+        const unsigned char *p = src_nchw_u8 + src_hw;
+        __builtin_prefetch(p + 32, 0, 1);
+        dst_half[dst_base + 0] = lut[p[0 * HW]];
+        dst_half[dst_base + 1] = lut[p[1 * HW]];
+        dst_half[dst_base + 2] = lut[p[2 * HW]];
+        dst_half[dst_base + 3] = lut[p[3 * HW]];
+        dst_half[dst_base + 4] = lut[p[4 * HW]];
+        dst_half[dst_base + 5] = lut[p[5 * HW]];
+        dst_half[dst_base + 6] = lut[p[6 * HW]];
+        dst_half[dst_base + 7] = lut[p[7 * HW]];
+        dst_half[dst_base + 8] = lut[p[8 * HW]];
+        dst_half[dst_base + 9] = lut[p[9 * HW]];
+        dst_half[dst_base + 10] = lut[p[10 * HW]];
+        dst_half[dst_base + 11] = lut[p[11 * HW]];
+      }
+    }
+    return;
+  }
+
+  // Unknown layout: keep fail-fast so we don't silently corrupt input semantics.
+  LOGE("Unsupported RKNN input format for vision conversion: %d", dst_attr.fmt);
+  assert(false);
+}
+}  // namespace
 
 void DrivingRKNNModel::load_model(const std::string& path, DrivingRKNNModel::ModelCtx* out) {
   std::string model_data = util::read_file(path);
@@ -32,7 +152,7 @@ void DrivingRKNNModel::load_model(const std::string& path, DrivingRKNNModel::Mod
   assert(model_len > 0);
 
   RKNN_CHECK(rknn_init(&out->ctx, (void*)modelptr, model_len, RKNN_FLAG_EXECUTE_FALLBACK_PRIOR_DEVICE_GPU, NULL));
-  rknn_set_core_mask(out->ctx, RKNN_NPU_CORE_2);
+  rknn_set_core_mask(out->ctx, parse_driving_core_mask());
   rknn_write_driver_version_to_shm(out->ctx);
 
   RKNN_CHECK(rknn_query(out->ctx, RKNN_QUERY_IN_OUT_NUM, &out->io_num, sizeof(out->io_num)));
@@ -57,7 +177,8 @@ void DrivingRKNNModel::load_model(const std::string& path, DrivingRKNNModel::Mod
   for (uint32_t i = 0; i < out->io_num.n_input; i++) {
     out->rknn_inputs[i].index = i;
     out->rknn_inputs[i].fmt = out->input_attrs[i].fmt;
-    out->rknn_inputs[i].pass_through = 1;
+    // Match Python RKNN "safe default" path: no explicit pass-through behavior.
+    out->rknn_inputs[i].pass_through = 0;
     out->rknn_inputs[i].type = RKNN_TENSOR_FLOAT16;
     out->rknn_inputs[i].size = out->input_attrs[i].size;
     out->rknn_inputs[i].buf = out->input_bufs[i].data();
@@ -82,6 +203,16 @@ DrivingRKNNModel::DrivingRKNNModel(const std::string& vision_path,
       policy_run_us_(0) {
   load_model(vision_path, vision_ctx_);
   load_model(policy_path, policy_ctx_);
+  vision_ctx_->idx_img = std::max(0, find_input_index(vision_ctx_->input_attrs, vision_ctx_->io_num.n_input, {"img"}));
+  vision_ctx_->idx_big = find_input_index(vision_ctx_->input_attrs, vision_ctx_->io_num.n_input, {"big_img", "big"});
+  if (vision_ctx_->idx_big < 0 || vision_ctx_->idx_big == vision_ctx_->idx_img) vision_ctx_->idx_big = (vision_ctx_->idx_img == 0) ? 1 : 0;
+
+  policy_ctx_->idx_dp = find_input_index(policy_ctx_->input_attrs, policy_ctx_->io_num.n_input, {"desire_pulse", "desire"});
+  policy_ctx_->idx_tc = find_input_index(policy_ctx_->input_attrs, policy_ctx_->io_num.n_input, {"traffic_convention", "traffic"});
+  policy_ctx_->idx_fb = find_input_index(policy_ctx_->input_attrs, policy_ctx_->io_num.n_input, {"features_buffer", "features"});
+  if (policy_ctx_->idx_dp < 0) policy_ctx_->idx_dp = 0;
+  if (policy_ctx_->idx_tc < 0) policy_ctx_->idx_tc = 1;
+  if (policy_ctx_->idx_fb < 0) policy_ctx_->idx_fb = 2;
   // Prealloc output buffers so rknn_outputs_get writes directly (avoids extra memcpy).
   // With want_float=1, RKNN expects size = n_elems * sizeof(float), not native tensor size.
   assert(vision_ctx_->io_num.n_output == 1 && policy_ctx_->io_num.n_output == 1);
@@ -110,18 +241,13 @@ DrivingRKNNModel::~DrivingRKNNModel() {
 void DrivingRKNNModel::run_vision(const unsigned char* img, const unsigned char* big_img) {
   ModelCtx* m = vision_ctx_;
   assert(m->io_num.n_input >= 2);
-  const uint32_t n_img = m->input_attrs[0].n_elems;
-  const uint32_t n_big = m->input_attrs[1].n_elems;
-  half* buf0 = m->input_bufs[0].data();
-  half* buf1 = m->input_bufs[1].data();
-  for (uint32_t i = 0; i < n_img; i++) {
-    float v = img[i] / 255.0f;
-    buf0[i] = float_to_half(v);
-  }
-  for (uint32_t i = 0; i < n_big; i++) {
-    float v = big_img[i] / 255.0f;
-    buf1[i] = float_to_half(v);
-  }
+  const int idx_img = m->idx_img;
+  const int idx_big = m->idx_big;
+
+  half* buf_img = m->input_bufs[idx_img].data();
+  half* buf_big = m->input_bufs[idx_big].data();
+  fill_vision_input_half_from_u8(img, m->input_attrs[idx_img], buf_img);
+  fill_vision_input_half_from_u8(big_img, m->input_attrs[idx_big], buf_big);
   RKNN_CHECK(rknn_inputs_set(m->ctx, m->io_num.n_input, m->rknn_inputs.data()));
   RKNN_CHECK(rknn_run(m->ctx, NULL));
   RKNN_CHECK(rknn_outputs_get(m->ctx, m->io_num.n_output, m->rknn_outputs.data(), NULL));
@@ -135,9 +261,12 @@ void DrivingRKNNModel::run_policy(const float* desire_pulse,
                                  const float* features_buffer) {
   ModelCtx* m = policy_ctx_;
   assert(m->io_num.n_input >= 3);
-  float_to_half_array(const_cast<float*>(desire_pulse), m->input_bufs[0].data(), m->input_attrs[0].n_elems);
-  float_to_half_array(const_cast<float*>(traffic_convention), m->input_bufs[1].data(), m->input_attrs[1].n_elems);
-  float_to_half_array(const_cast<float*>(features_buffer), m->input_bufs[2].data(), m->input_attrs[2].n_elems);
+  const int idx_dp = m->idx_dp;
+  const int idx_tc = m->idx_tc;
+  const int idx_fb = m->idx_fb;
+  float_to_half_array(const_cast<float*>(desire_pulse), m->input_bufs[idx_dp].data(), m->input_attrs[idx_dp].n_elems);
+  float_to_half_array(const_cast<float*>(traffic_convention), m->input_bufs[idx_tc].data(), m->input_attrs[idx_tc].n_elems);
+  float_to_half_array(const_cast<float*>(features_buffer), m->input_bufs[idx_fb].data(), m->input_attrs[idx_fb].n_elems);
   RKNN_CHECK(rknn_inputs_set(m->ctx, m->io_num.n_input, m->rknn_inputs.data()));
   RKNN_CHECK(rknn_run(m->ctx, NULL));
   RKNN_CHECK(rknn_outputs_get(m->ctx, m->io_num.n_output, m->rknn_outputs.data(), NULL));

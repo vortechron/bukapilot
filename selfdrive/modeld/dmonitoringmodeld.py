@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os
-import sys
 from openpilot.system.hardware import TICI, KA2
 os.environ['DEV'] = 'QCOM' if TICI else ('CL' if KA2 else 'CPU')
 
@@ -36,10 +35,11 @@ DMONITORING_RKNN_PATH = Path(__file__).parent / 'models/dmonitoring_model.rknn'
 
 
 def _use_rknn_dmonitoring() -> bool:
-  """Use RKNN for dmonitoring when dmonitoring_model.rknn exists. Set USE_RKNN_DM=0 to force tinygrad."""
-  if not DMONITORING_RKNN_PATH.exists():
-    return False
-  return os.getenv('USE_RKNN_DM', '1') != '0'
+  """
+  On KA2, use RKNN by default when dmonitoring_model.rknn exists.
+  Non-KA2 platforms keep tinygrad/OpenCL/CPU behavior.
+  """
+  return KA2 and DMONITORING_RKNN_PATH.exists()
 
 
 class ModelState:
@@ -108,27 +108,11 @@ class ModelStateRKNN:
       cloudlog.warning("dmonitoringmodeld RKNN: C++ extension unavailable (%s), using Python rknnlite (slower)", e)
       from openpilot.selfdrive.modeld.runners.dmonitoring_rknn import DMonitoringRKNNRunner
       self._rknn = DMonitoringRKNNRunner(Path(__file__).parent / 'models')
-    self._capture_list = [] if (os.getenv('DMONITORING_CAPTURE_FRAMES') and os.getenv('DMONITORING_CAPTURE_PATH')) else None  # type: ignore[assignment]
 
   def run(self, buf: VisionBuf, calib: np.ndarray, transform: np.ndarray) -> tuple[np.ndarray, float]:
     self.numpy_inputs['calib'][0, :] = calib
     input_img_cl = self.frame.prepare(buf, transform.flatten())
     input_img_np = self.frame.buffer_from_cl(input_img_cl).reshape(self.input_shapes['input_img'])
-
-    if self._capture_list is not None:
-      n_capture = int(os.getenv('DMONITORING_CAPTURE_FRAMES', '0'))
-      path = os.getenv('DMONITORING_CAPTURE_PATH', '')
-      is_duplicate = any(np.array_equal(input_img_np, c['input_img']) for c in self._capture_list)
-      if not is_duplicate:
-        self._capture_list.append({
-          'input_img': input_img_np.copy(),
-          'calib': np.asarray(calib, dtype=np.float32).copy(),
-        })
-      if len(self._capture_list) >= n_capture:
-        with open(path, 'wb') as f:
-          pickle.dump(self._capture_list, f)
-        cloudlog.warning("dmonitoringmodeld captured %d unique frames to %s, exiting", len(self._capture_list), path)
-        sys.exit(0)
 
     t1 = time.perf_counter()
     if self._rknn_cpp is not None:
@@ -137,6 +121,7 @@ class ModelStateRKNN:
     else:
       output = self._rknn.run(input_img_np, self.numpy_inputs['calib'])
       gpu_time = (time.perf_counter() - t1)
+
     return output, gpu_time
 
 
@@ -188,7 +173,7 @@ def main():
     cloudlog.warning("using RKNN dmonitoring runner (NPU core 1); inputs cast to float16")
     model = ModelStateRKNN(cl_context)
   else:
-    override = " (USE_RKNN_DM=0)" if DMONITORING_RKNN_PATH.exists() else ""
+    override = " (set USE_RKNN_DM=1 to switch to RKNN)" if DMONITORING_RKNN_PATH.exists() else ""
     cloudlog.warning("using tinygrad dmonitoring runner%s", override)
     model = ModelState(cl_context)
   cloudlog.warning("models loaded, dmonitoringmodeld starting")

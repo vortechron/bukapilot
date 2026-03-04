@@ -16,8 +16,6 @@ except ImportError:
 
 
 def _to_fp16(x: np.ndarray) -> np.ndarray:
-  if x.dtype == np.uint8:
-    return (x.astype(np.float32) / 255.0).astype(np.float16)
   return x.astype(np.float16)
 
 

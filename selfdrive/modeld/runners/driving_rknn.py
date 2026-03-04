@@ -4,6 +4,7 @@ Requires: driving_vision.rknn, driving_policy.rknn in the model folder and rknnl
 """
 from __future__ import annotations
 
+import os
 import pickle
 from pathlib import Path
 
@@ -16,9 +17,7 @@ except ImportError:
 
 
 def _to_fp16(x: np.ndarray) -> np.ndarray:
-  """Cast to float16. For uint8 images we normalize to [0,1] then cast."""
-  if x.dtype == np.uint8:
-    return (x.astype(np.float32) / 255.0).astype(np.float16)
+  """Cast to float16 without changing value range."""
   return x.astype(np.float16)
 
 
@@ -62,28 +61,62 @@ class DrivingRKNNRunner:
     self._vision_rknn.load_rknn(str(vision_rknn_path))
     self._vision_rknn.init_runtime()
     n_vision_in = len(self.vision_input_names)
-    self._vision_pass_through = [0] * n_vision_in
-    self._vision_data_format = ["nchw"] * n_vision_in
+    vision_pt = int(os.getenv("RKNN_PY_VISION_PT", "0"))
+    vision_fmt = os.getenv("RKNN_PY_VISION_FORMAT", "nchw").lower()
+    vision_layout = os.getenv("RKNN_PY_VISION_LAYOUT", "nhwc").lower()
+    if vision_layout not in ("nchw", "nhwc"):
+      vision_layout = "nhwc"
+    self._vision_layout = vision_layout
+    self._vision_pass_through = [vision_pt] * n_vision_in
+    self._vision_data_format = [vision_fmt] * n_vision_in
+    self._vision_use_explicit_format = os.getenv("RKNN_PY_VISION_EXPLICIT", "0") != "0"
 
     # Policy RKNN
     self._policy_rknn = RKNNLite(verbose=False)
     self._policy_rknn.load_rknn(str(policy_rknn_path))
     self._policy_rknn.init_runtime()
     n_policy_in = len(self.policy_input_names)
-    self._policy_pass_through = [0] * n_policy_in
-    self._policy_data_format = ["nchw"] * n_policy_in
+    policy_pt = int(os.getenv("RKNN_PY_POLICY_PT", "0"))
+    policy_fmt = os.getenv("RKNN_PY_POLICY_FORMAT", "nchw").lower()
+    self._policy_pass_through = [policy_pt] * n_policy_in
+    self._policy_data_format = [policy_fmt] * n_policy_in
+    self._policy_use_explicit_format = os.getenv("RKNN_PY_POLICY_EXPLICIT", "0") != "0"
 
   def run_vision(self, img: np.ndarray, big_img: np.ndarray) -> np.ndarray:
     """Run vision model. img and big_img are uint8; cast to float16 and run. Returns float32 (1, 1576)."""
-    img_fp16 = _to_fp16(img.reshape(self.vision_input_shapes["img"]))
-    big_img_fp16 = _to_fp16(big_img.reshape(self.vision_input_shapes["big_img"]))
+    img_fp16 = np.ascontiguousarray(_to_fp16(img.reshape(self.vision_input_shapes["img"])))
+    big_img_fp16 = np.ascontiguousarray(_to_fp16(big_img.reshape(self.vision_input_shapes["big_img"])))
+    if self._vision_layout == "nhwc":
+      # RKNN runtime on KA2 often expects NHWC feed for this model.
+      img_fp16 = np.transpose(img_fp16, (0, 2, 3, 1))
+      big_img_fp16 = np.transpose(big_img_fp16, (0, 2, 3, 1))
+      img_fp16 = np.ascontiguousarray(img_fp16)
+      big_img_fp16 = np.ascontiguousarray(big_img_fp16)
     inputs = [img_fp16, big_img_fp16]
-    outputs = self._vision_rknn.inference(
-      inputs=inputs,
-      data_type="float16",
-      inputs_pass_through=self._vision_pass_through,
-      data_format=self._vision_data_format,
-    )
+    outputs = None
+    if self._vision_use_explicit_format:
+      try:
+        outputs = self._vision_rknn.inference(
+          inputs=inputs,
+          data_type="float16",
+          inputs_pass_through=self._vision_pass_through,
+          data_format=self._vision_data_format,
+        )
+      except Exception:
+        # Some RKNNLite builds reject explicit format enums. Switch once to stable default path.
+        self._vision_use_explicit_format = False
+      if outputs is None:
+        # RKNNLite may log internal set_inputs error and return None without raising.
+        # Disable explicit mode once to avoid per-frame error spam.
+        self._vision_use_explicit_format = False
+
+    if outputs is None:
+      outputs = self._vision_rknn.inference(
+        inputs=inputs,
+        data_type="float16",
+      )
+    if outputs is None:
+      raise RuntimeError("RKNNLite vision inference returned None")
     assert len(outputs) == 1
     out = outputs[0]
     if out.dtype != np.float32:
@@ -100,13 +133,28 @@ class DrivingRKNNRunner:
     dp = _to_fp16(desire_pulse.reshape(self.policy_input_shapes["desire_pulse"]))
     tc = _to_fp16(traffic_convention.reshape(self.policy_input_shapes["traffic_convention"]))
     fb = _to_fp16(features_buffer.reshape(self.policy_input_shapes["features_buffer"]))
-    inputs = [dp, tc, fb]
-    outputs = self._policy_rknn.inference(
-      inputs=inputs,
-      data_type="float16",
-      inputs_pass_through=self._policy_pass_through,
-      data_format=self._policy_data_format,
-    )
+    inputs = [np.ascontiguousarray(dp), np.ascontiguousarray(tc), np.ascontiguousarray(fb)]
+    outputs = None
+    if self._policy_use_explicit_format:
+      try:
+        outputs = self._policy_rknn.inference(
+          inputs=inputs,
+          data_type="float16",
+          inputs_pass_through=self._policy_pass_through,
+          data_format=self._policy_data_format,
+        )
+      except Exception:
+        self._policy_use_explicit_format = False
+      if outputs is None:
+        self._policy_use_explicit_format = False
+
+    if outputs is None:
+      outputs = self._policy_rknn.inference(
+        inputs=inputs,
+        data_type="float16",
+      )
+    if outputs is None:
+      raise RuntimeError("RKNNLite policy inference returned None")
     assert len(outputs) == 1
     out = outputs[0]
     if out.dtype != np.float32:
