@@ -219,7 +219,10 @@ class Uploader:
   def do_upload(self, key: str, fn: str):
     key, ext = os.path.splitext(key.replace("/", "---"))
 
-    if "boot" in key or "crash" in key:
+    if key.startswith("boot---"):
+      # Keep boot filename as-is (zst) and avoid inserting an extra ---boot--- segment.
+      key = self.dongle_id + "---" + key[len("boot---"):] + ext
+    elif "crash" in key:
       key = "---".join([self.dongle_id] + list(reversed(key.split("---")))) + ext
     else:
       key = self.dongle_id + "---" + key + ext
@@ -375,14 +378,9 @@ class Uploader:
     d = self.next_file_to_upload(metered)
     if d is not None:
       name, key, fn = d
-      # Keep current zstd naming for driving logs, but use legacy boot key naming for kommu backend.
+      # Keep zstd naming for driving logs.
       if key.endswith(('qlog', 'rlog')):
         key += ".zst"
-      elif key.startswith('boot/'):
-        if key.endswith('.zst'):
-          key = key[:-4] + '.bz2'
-        elif not key.endswith('.bz2'):
-          key += ".bz2"
       return self.upload(name, key, fn, network_type, metered)
 
     return None
