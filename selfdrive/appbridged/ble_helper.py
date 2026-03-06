@@ -3,6 +3,7 @@ import threading
 from time import monotonic, sleep
 from queue import SimpleQueue
 from bluezero import adapter, peripheral
+from openpilot.common.swaglog import cloudlog
 
 # BLE Nordic UART UUIDs
 UART_SERVICE      = '6E400001-B5A3-F393-E0A9-E50E24DCCA9E'
@@ -10,9 +11,6 @@ RX_CHARACTERISTIC = '6E400002-B5A3-F393-E0A9-E50E24DCCA9E'  # Write from phone
 TX_CHARACTERISTIC = '6E400003-B5A3-F393-E0A9-E50E24DCCA9E'  # Notify to phone
 
 CHUNK_TIMEOUT = 1.0  # seconds before dropping incomplete message
-CHUNK_SIZE = 240
-MAX_TOTAL_SEGMENTS = 256  # ~61KB max message; avoid huge allocations
-MAX_MESSAGE_BYTES = 128 * 1024  # 128KB hard cap on assembled message size
 
 class BLEBridge:
   """Threaded BLE Nordic UART bridge with RX and TX."""
@@ -22,6 +20,8 @@ class BLEBridge:
 
     self.rx_queue = SimpleQueue()
     self.tx_char = None
+    self._counters = {}
+    self._tx_accepts_bytes = None
 
     # Add UART service
     self.dev.add_service(srv_id=1, uuid=UART_SERVICE, primary=True)
@@ -56,6 +56,7 @@ class BLEBridge:
 
   def notify_state(self, notifying, characteristic):
     self.tx_char = characteristic if notifying else None
+    self._tx_accepts_bytes = None
 
   def on_write(self, value, options):
     """Receive bytes from phone and store in queue."""
@@ -63,14 +64,28 @@ class BLEBridge:
 
   def send(self, payload: bytes):
     """Send bytes to phone via BLE."""
-    if self.tx_char:
-      self.tx_char.set_value(list(payload))
+    if not (tx_char := self.tx_char):
+      return
+
+    if (accepts_bytes := self._tx_accepts_bytes) is False:
+      tx_char.set_value(list(payload))
+      return
+
+    if accepts_bytes is True:
+      tx_char.set_value(payload)
+      return
+
+    # Probe once, then cache capability for the fast path.
+    try:
+      tx_char.set_value(payload)
+      self._tx_accepts_bytes = True
+    except TypeError:
+      self._tx_accepts_bytes = False
+      tx_char.set_value(list(payload))
 
   def read(self):
     """Pop next received BLE packet if available."""
-    if not self.rx_queue.empty():
-      return self.rx_queue.get()
-    return None
+    return q.get_nowait() if not (q := self.rx_queue).empty() else None
 
   def start(self):
     """Start BLE peripheral loop."""
@@ -80,59 +95,102 @@ class BLEBridge:
 
   def chunk_and_send(self, channel: int, payload: bytes, CHUNK_SIZE=240):
     """Split payload into BLE chunks and send."""
-    cnts = getattr(self, "_counters", setattr(self, "_counters", {}) or self._counters)
-    cnts[channel] = msg_id = cnts.get(channel, 0) % 255 + 1
+    if CHUNK_SIZE <= 0:
+      return
+    if not self.tx_char:
+      return
+
+    # Message ID cycles from 1 to 255
+    cnts = self._counters
+    msg_id = (cnts.get(channel, 0) % 255) + 1
+    cnts[channel] = msg_id
+
+    if not (payload_len := len(payload)):
+      return
+
+    if channel > 255 or (total_segments := (payload_len + CHUNK_SIZE - 1) // CHUNK_SIZE) > 255:
+      raise ValueError("BLE chunk header overflow")
+
     view = memoryview(payload)
-    for seg_idx in range(total_segments := -(-len(payload) // CHUNK_SIZE)):
+    header = bytearray(4)
+    header[0] = channel
+    header[1] = msg_id
+    header[2] = total_segments
+    send = self.send
+
+    for seg_idx in range(total_segments):
       offset = seg_idx * CHUNK_SIZE
-      self.send(bytes([channel, msg_id, total_segments, seg_idx]) + view[offset:offset + CHUNK_SIZE])
+      header[3] = seg_idx
+      send(header + view[offset:offset + CHUNK_SIZE])
 
 class ChunkReceiver:
   """Assemble incoming BLE chunks into full messages."""
   def __init__(self, ble):
     self.ble = ble
-    self.lock = threading.Lock()
+    # { (channel, msg_id): [chunks_list, missing_count, last_time] }
     self.active_messages = {}
     self.completed_messages = SimpleQueue()
+    self._next_cleanup_time = monotonic() + (CHUNK_TIMEOUT * 0.5)
     threading.Thread(target=self._receive_loop, daemon=True).start()
 
   def _receive_loop(self):
+    """Continuously read BLE packets, assemble chunks, drop timed-out messages."""
     while True:
       processed_packet = False
-      if self.ble.connected:
-        while pkt := self.ble.read():
+      if connected := self.ble.connected:
+        ble_read = self.ble.read
+        active_messages = self.active_messages
+        completed_messages_put = self.completed_messages.put
+        while (pkt := ble_read()) is not None:
           processed_packet = True
           if len(pkt) < 4:
             continue
-          channel, msg_id, total_segments, seg_idx = pkt[0], pkt[1], pkt[2], pkt[3]
+
+          channel = pkt[0]
+          msg_id = pkt[1]
+          total_segments = pkt[2]
+          seg_idx = pkt[3]
+          if total_segments == 0 or seg_idx >= total_segments:
+            continue
+
           chunk = pkt[4:]
-          if total_segments < 1 or total_segments > MAX_TOTAL_SEGMENTS:
-            continue
-          if seg_idx >= total_segments:
-            continue
-          key = (channel, msg_id)
-          now = monotonic()
-          with self.lock:
-            entry = self.active_messages.get(key)
-            if entry is None:
-              entry = [[None] * total_segments, total_segments, now]
-              self.active_messages[key] = entry
-            chunks_list, total, _ = entry
-            chunks_list[seg_idx] = chunk
-            entry[2] = now
+          key = (channel << 8) | msg_id
+          now = monotonic()  # assign once per packet
+          if (entry := active_messages.get(key)) is None:
+            chunks_list = [None] * total_segments
+            entry = [chunks_list, total_segments, now]
+            active_messages[key] = entry
+          else:
+            chunks_list, _, _ = entry
+            if len(chunks_list) != total_segments:
+              chunks_list = [None] * total_segments
+              entry[0] = chunks_list
+              entry[1] = total_segments
 
-            if None not in chunks_list:
-              msg = b''.join(chunks_list)
-              if len(msg) <= MAX_MESSAGE_BYTES:
-                self.completed_messages.put((channel, msg))
-              del self.active_messages[key]
+          chunks_list, missing_count, _ = entry
+          if chunks_list[seg_idx] is None:
+            missing_count -= 1
+          chunks_list[seg_idx] = chunk
+          entry[1] = missing_count
+          entry[2] = now
 
-            for key2, (chunks, total, last_time) in list(self.active_messages.items()):
-              if now - last_time > CHUNK_TIMEOUT:
-                del self.active_messages[key2]
+          if missing_count == 0:
+            completed_messages_put((channel, b"".join(chunks_list)))
+            del active_messages[key]
+
+          if now >= self._next_cleanup_time:
+            self._cleanup_stale_messages(now)
+            self._next_cleanup_time = now + (CHUNK_TIMEOUT * 0.5)
 
       if not processed_packet:
-        sleep(0.01)
+        sleep(0.002 if connected else 0.05) # Small sleep only when no packets are ready
+
+  def _cleanup_stale_messages(self, now):
+    if stale_keys := [k for k, (_, _, last_time) in self.active_messages.items() if now - last_time > CHUNK_TIMEOUT]:
+      for key in stale_keys:
+        cloudlog.info("Dropping incomplete BLE message")
+        del self.active_messages[key]
 
   def get_message(self):
-    return q.get() if not (q := self.completed_messages).empty() else None
+    """Return the next completed message if available."""
+    return q.get_nowait() if not (q := self.completed_messages).empty() else None

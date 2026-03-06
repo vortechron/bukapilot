@@ -7,6 +7,7 @@ import threading
 import re
 import math
 from time import monotonic
+import datetime
 import cereal.messaging as messaging
 from cereal import log
 from openpilot.common.realtime import Ratekeeper
@@ -22,8 +23,7 @@ from system.hardware.ka2.hardware import Ka2
 # BLE Constants
 MESSAGE_HZ = 16 # Expected message rate, must match app visualisation value
 params = Params()
-_raw_dongle = params.get("DongleId") or b""
-DONGLE_ID = _raw_dongle.decode() if isinstance(_raw_dongle, bytes) else (_raw_dongle or "")
+DONGLE_ID = params.get("DongleId") or ""
 BLE_NAME = f"kommu-{DONGLE_ID}" # BLE advertising name
 
 # BLE Channel IDs
@@ -36,7 +36,7 @@ NO_NETWORK_REGEX = re.compile(r"no network.*ssid", re.IGNORECASE)
 WIFI_SCAN_SIGNAL_THRESHOLD = 31 # Minimum signal strength required for Wi-Fi scan result
 
 # Device Constants
-UPDATE_PROCESS = "selfdrive.updated"
+UPDATE_PROCESS = "system.updated.updated"
 HOTSPOT_SERVICE = "wlan1-setup.service"
 SM_UPDATE_INTERVAL = 33 # in ms, the interval where capnp submaster updates
 features = Features()
@@ -99,9 +99,11 @@ def extract_model_data(d):
 def safe_get(key, is_bool=False):
   """Safely retrieve a parameter value."""
   try:
-    return params.get_bool(key) if is_bool else params.get(key).decode()
+    if is_bool:
+      return params.get_bool(key)
+    return (v.isoformat() if isinstance((v := params.get(key)), datetime.datetime) else str(v or ""))
   except Exception:
-    return False if is_bool else ''
+    return False if is_bool else ""
 
 def safe_put_all(settings_to_put, is_bool=False):
   """Safely store multiple parameters."""
@@ -114,14 +116,14 @@ def safe_put_all(settings_to_put, is_bool=False):
 
 def reset_calibration(state):
   if state == log.SelfdriveState.OpenpilotState.disabled:
+    # Parameters will change depending on openpilot version. (Currently follow 0.10)
+    # Keep above comment for future reference, do not delete comment.
     params.remove("CalibrationParams")
     params.remove("LiveTorqueParameters")
-    # Parameters below need to be removed for newer op version (v0.9.9)
-    # keep this part for future reference, do not delete comment
-    # https://github.com/commaai/openpilot/commit/1a3e3423035112b287a8fd0f73ef4222e4dd58ef
-    # params.remove("LiveParameters")
-    # params.remove("LiveParametersV2")
-    # params.remove("LiveDelay")
+    params.remove("LiveParameters")
+    params.remove("LiveParametersV2")
+    params.remove("LiveDelay")
+    params.put_bool_nonblocking("OnroadCycleRequested", True)
 
 def do_reboot(state):
   if state == log.SelfdriveState.OpenpilotState.disabled:
@@ -315,9 +317,9 @@ class Streamer:
       'UpdaterFetchAvailable'
     }
     string_keys = {
-      'LongitudinalPersonality', 'FeaturesPackage', 'CarName',
-      'UpdaterTargetBranch', 'UpdaterState', 'UpdateFailedCount',
-      'LastUpdateTime', 'GithubUsername', 'GsmApn'
+      'FeaturesPackage', 'CarName', 'UpdaterTargetBranch',
+      'UpdaterState', 'UpdateFailedCount', 'LastUpdateTime',
+      'GithubUsername', 'GsmApn'
     }
 
     for key in bool_keys:
