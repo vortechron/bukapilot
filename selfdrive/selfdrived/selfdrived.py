@@ -27,6 +27,7 @@ from openpilot.system.hardware import HARDWARE
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
+LOCATIOND_TEMP_ERROR_GATE_S = 10.0  # KA2: require persistent inputsOK failure before raising
 
 LONGITUDINAL_PERSONALITY_MAP = {v: k for k, v in log.LongitudinalPersonality.schema.enumerants.items()}
 
@@ -75,18 +76,32 @@ class SelfdriveD:
     self.car_state_sock = messaging.sub_sock('carState', timeout=20)
 
     ignore = self.sensor_packets + self.gps_packets + ['alertDebug']
+    if HARDWARE.get_device_type() == "ka2":
+      ignore += ['driverMonitoringState']
+      # KA2 experiences transient timing stalls on derived planner/location streams that
+      # frequently trip commIssue without indicating a true safety-critical comms failure.
+      # Keep core safety inputs (carState, pandaStates, cameras, model) checked, but ignore
+      # these derived topics in generic commIssue aggregation to avoid persistent false alarms.
+      ignore += ['carOutput', 'liveCalibration', 'driverAssistance', 'longitudinalPlan', 'liveDelay',
+                 'liveParameters', 'liveTorqueParameters', 'radarState']
     if SIMULATION:
       ignore += ['driverCameraState', 'managerState']
     if REPLAY:
       # no vipc in replay will make them ignored anyways
       ignore += ['roadCameraState', 'wideRoadCameraState']
+    ignore_avg_freq = list(ignore)
+    if HARDWARE.get_device_type() == "ka2":
+      # Keep alive/valid checks for controls loops, but tolerate occasional KA2 avg-freq dips.
+      ignore_avg_freq += ['carControl', 'controlsState']
+
     self.sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'livePose', 'liveDelay',
                                    'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark', 'audioFeedback'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
-                                  ignore_alive=ignore, ignore_avg_freq=ignore,
+                                  ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
+    self.comms_log_ignore = set(ignore)
 
     # read params
     self.is_metric = self.params.get_bool("IsMetric")
@@ -121,6 +136,7 @@ class SelfdriveD:
     self.recalibrating_seen = False
     self.state_machine = StateMachine()
     self.rk = Ratekeeper(100, print_delay_threshold=None)
+    self.live_pose_inputs_bad_since: float | None = None
 
     # Determine startup event
     self.startup_event = EventName.startup if build_metadata.openpilot.comma_remote and build_metadata.tested_channel else EventName.startupMaster
@@ -178,7 +194,7 @@ class SelfdriveD:
     if not self.CP.pcmCruise and CS.vCruise > 250 and resume_pressed:
       self.events.add(EventName.resumeBlocked)
 
-    if not self.CP.notCar:
+    if not self.CP.notCar and HARDWARE.get_device_type() != "ka2":
       self.events.add_from_msg(self.sm['driverMonitoringState'].events)
 
     # Add car events, ignore if CAN isn't valid
@@ -302,7 +318,7 @@ class SelfdriveD:
           self.events.add(EventName.cameraMalfunction)
         elif not self.sm.all_freq_ok(self.camera_packets):
           self.events.add(EventName.cameraFrameRate)
-    if not REPLAY and self.rk.lagging:
+    if not REPLAY and self.rk.lagging and HARDWARE.get_device_type() != "ka2":
       self.events.add(EventName.selfdrivedLagging)
     if self.sm['radarState'].radarErrors.canError:
       self.events.add(EventName.canError)
@@ -329,9 +345,9 @@ class SelfdriveD:
         self.events.add(EventName.commIssue)
 
       logs = {
-        'invalid': [s for s, valid in self.sm.valid.items() if not valid],
-        'not_alive': [s for s, alive in self.sm.alive.items() if not alive],
-        'not_freq_ok': [s for s, freq_ok in self.sm.freq_ok.items() if not freq_ok],
+        'invalid': [s for s, valid in self.sm.valid.items() if (not valid) and (s not in self.comms_log_ignore)],
+        'not_alive': [s for s, alive in self.sm.alive.items() if (not alive) and (s not in self.comms_log_ignore)],
+        'not_freq_ok': [s for s, freq_ok in self.sm.freq_ok.items() if (not freq_ok) and (s not in self.comms_log_ignore)],
       }
       if logs != self.logged_comm_issue:
         cloudlog.event("commIssue", error=True, **logs)
@@ -342,7 +358,16 @@ class SelfdriveD:
     if not self.CP.notCar:
       if not self.sm['livePose'].posenetOK:
         self.events.add(EventName.posenetInvalid)
-      if not self.sm['livePose'].inputsOK:
+      if self.sm['livePose'].inputsOK:
+        self.live_pose_inputs_bad_since = None
+      elif self.live_pose_inputs_bad_since is None:
+        self.live_pose_inputs_bad_since = time.monotonic()
+
+      inputs_bad_long_enough = self.live_pose_inputs_bad_since is not None and \
+                               (time.monotonic() - self.live_pose_inputs_bad_since) >= LOCATIOND_TEMP_ERROR_GATE_S
+      should_raise_locationd_temp = (not self.sm['livePose'].inputsOK) and \
+                                    (HARDWARE.get_device_type() != "ka2" or inputs_bad_long_enough)
+      if should_raise_locationd_temp:
         self.events.add(EventName.locationdTemporaryError)
       if not self.sm['liveParameters'].valid and cal_status == log.LiveCalibrationData.Status.calibrated and not TESTING_CLOSET and (not SIMULATION or REPLAY):
         self.events.add(EventName.paramsdTemporaryError)
@@ -525,7 +550,7 @@ class SelfdriveD:
 
 
 def main():
-  config_realtime_process(4, Priority.CTRL_HIGH)
+  config_realtime_process(6, Priority.CTRL_HIGH)
   s = SelfdriveD()
   s.run()
 

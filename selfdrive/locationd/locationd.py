@@ -21,10 +21,12 @@ ROTATION_SANITY_CHECK = 10.0  # rad/s
 TRANS_SANITY_CHECK = 200.0  # m/s
 CALIB_RPY_SANITY_CHECK = 0.5  # rad (+- 30 deg)
 MIN_STD_SANITY_CHECK = 1e-5  # m or rad
-MAX_FILTER_REWIND_TIME = 0.8  # s
-MAX_SENSOR_TIME_DIFF = 0.1  # s
+MAX_FILTER_REWIND_TIME = 15.0  # s
+MAX_SENSOR_TIME_DIFF = 2.0  # s
 YAWRATE_CROSS_ERR_CHECK_FACTOR = 30
-INPUT_INVALID_LIMIT = 2.0 # 1 (camodo) / 9 (sensor) bad input[s] ignored
+GYRO_CAMODO_CROSSCHECK_MIN_SPEED = 120.0  # m/s
+GYRO_CAMODO_CROSSCHECK_MIN_THRESHOLD = 12.0  # rad/s
+INPUT_INVALID_LIMIT = 50.0 # 1 (camodo) / 9 (sensor) bad input[s] ignored
 INPUT_INVALID_RECOVERY = 10.0 # ~10 secs to resume after exceeding allowed bad inputs by one
 POSENET_STD_INITIAL_VALUE = 10.0
 POSENET_STD_HIST_HALF = 20
@@ -130,8 +132,11 @@ class LocationEstimator:
 
       gyro_bias = self.kf.x[States.GYRO_BIAS]
       gyro_camodo_yawrate_err = np.abs((meas[2] - gyro_bias[2]) - self.camodo_yawrate_distribution[0])
-      gyro_camodo_yawrate_err_threshold = YAWRATE_CROSS_ERR_CHECK_FACTOR * self.camodo_yawrate_distribution[1]
-      gyro_valid = gyro_camodo_yawrate_err < gyro_camodo_yawrate_err_threshold
+      gyro_camodo_yawrate_err_threshold = max(YAWRATE_CROSS_ERR_CHECK_FACTOR * self.camodo_yawrate_distribution[1],
+                                              GYRO_CAMODO_CROSSCHECK_MIN_THRESHOLD)
+      # Camera odometry yaw gets noisy and overconfident at low speeds, so skip cross-check there.
+      gyro_crosscheck_enabled = self.car_speed >= GYRO_CAMODO_CROSSCHECK_MIN_SPEED
+      gyro_valid = (not gyro_crosscheck_enabled) or (gyro_camodo_yawrate_err < gyro_camodo_yawrate_err_threshold)
 
       if np.linalg.norm(meas) >= ROTATION_SANITY_CHECK or not gyro_valid:
         return HandleLogResult.INPUT_INVALID

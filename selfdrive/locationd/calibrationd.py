@@ -7,6 +7,7 @@ and the image input into the neural network is not corrected for roll.
 '''
 
 import os
+import time
 import capnp
 import numpy as np
 from typing import NoReturn
@@ -44,6 +45,7 @@ else:
   PITCH_LIMITS = np.array([-0.09074112085129739, 0.17])
 YAW_LIMITS = np.array([-0.06912048084718224, 0.06912048084718235])
 DEBUG = os.getenv("DEBUG") is not None
+KA2_CARSTATE_VALID_GRACE_S = 1.0
 
 
 def is_calibration_valid(rpy: np.ndarray) -> bool:
@@ -269,6 +271,7 @@ def main() -> NoReturn:
 
   calibrator = Calibrator(param_put=True)
   calibrator.not_car = CP.notCar
+  last_carstate_valid_t = 0.0
 
   while 1:
     timeout = 0 if sm.frame == -1 else 100
@@ -286,9 +289,23 @@ def main() -> NoReturn:
       if DEBUG and new_rpy is not None:
         print('got new rpy', new_rpy)
 
+    if sm.updated['carState'] and sm.valid['carState']:
+      last_carstate_valid_t = time.monotonic()
+
     # 4Hz driven by cameraOdometry
     if sm.frame % 5 == 0:
-      calibrator.send_data(pm, sm.all_checks())
+      live_calib_valid = sm.all_checks()
+
+      if HARDWARE.get_device_type() == "ka2":
+        # KA2 can intermittently delay carState delivery even when CAN is still flowing.
+        # Using raw sm.all_checks() here causes liveCalibration.valid to flap false and
+        # cascades into commIssue/locationdTemporaryError. Keep cameraOdometry strict and
+        # allow short carState timing hiccups if the latest received carState was valid.
+        camera_odom_ok = sm.all_checks(['cameraOdometry'])
+        recent_valid_carstate = (time.monotonic() - last_carstate_valid_t) < KA2_CARSTATE_VALID_GRACE_S
+        live_calib_valid = camera_odom_ok and recent_valid_carstate
+
+      calibrator.send_data(pm, live_calib_valid)
 
 
 if __name__ == "__main__":

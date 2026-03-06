@@ -1,0 +1,181 @@
+# Change Catalog from 0b41b42f7b23637e3bbb1f7495d318d954f971e7..HEAD
+
+This file is a detailed, numbered subgroup catalog of all notable changes found in:
+- bfa344191
+- 13a498b80
+- b29f7cc9e
+- 867b06209
+- 9e683c0ef
+- 7091f979f
+- fd646e34f
+- 5d7c242cf
+- 1ddad45b6
+- 59955b8f2
+- f3d80fb76
+- 1511dd176
+- 091093a73
+- 3837be7b0
+
+Use the subgroup IDs (for example `3.4`, `6.2`, `11.1`) to discuss removal/rollback candidates.
+
+---
+
+## 1) Identity, registration, and platform branding
+
+1.1 `common/kommu.py` introduced and iterated as the primary Kommu identity helper.
+1.2 Athena registration flow changed to use Kommu-specific logic (`system/athena/registration.py`).
+1.3 Additional registration/runtime support added (`system/athena/runescapej.py`).
+1.4 Registration tests later revised/cleaned (`system/athena/tests/test_registration.py`).
+1.5 Version/origin metadata updated across system components for KA2 branch handling.
+
+## 2) Repository, scaffolding, and dependency topology
+
+2.1 Project scaffolding normalized (`.gitignore`, `.gitattributes`, `.gitmodules`, `.lfsconfig`).
+2.2 Release/build scripts changed for KA2 workflows (`release/build_release_ka2.sh`).
+2.3 CI workflow added/updated (`.github/workflows/kommu_ci.yaml`).
+2.4 `RELEASES.md` significantly rewritten/normalized.
+2.5 `tinygrad_repo` reference adjusted.
+2.6 Submodule revisions bumped for `opendbc_repo` and `panda` (`fd646e34f` and later adjustments).
+2.7 `msgq_repo` converted from submodule style to tracked vendored source tree (`5d7c242cf`).
+
+## 3) KA2 hardware enablement and low-level system integration
+
+3.1 New KA2 hardware package scaffold (`system/hardware/ka2/*`).
+3.2 KA2 AGNOS descriptors/tools added (`agnos.json`, `agnos.py`).
+3.3 KA2 networking and eSIM support artifacts added.
+3.4 KA2 storage formatting utility introduced (`formatdevice.py`).
+3.5 KA2 GPIO/pin definitions added.
+3.6 KA2 status LED stack added (`status_led.py`, `indicatord.py`), later refined.
+3.7 Platform dispatch updated so hardware abstraction supports KA2 alongside TICI/PC.
+3.8 Power monitoring and hardwared paths adjusted for KA2 semantics.
+3.9 Manager process config updated to include KA2-only daemons.
+
+## 4) Camerad migration from Qualcomm stack to RK stack
+
+4.1 Qualcomm camera path removed/de-emphasized (`camera_qcom2`, spectra/cdm/ife/hw removals).
+4.2 Rockchip camera backend added (`camera_rk.cc`, `camera_rk.h`).
+4.3 Camera common interfaces updated for new backend behavior.
+4.4 Camerad build config updated for KA2-specific compilation paths.
+
+## 5) Loggerd, uploader, and storage pressure behavior
+
+5.1 Loggerd core behavior modified for KA2 operation (`logger.cc`, `loggerd.cc`, `logger.h`).
+5.2 New memory pressure handling added (C++ and Python helpers).
+5.3 Upload state/pending/full upload checks added or improved.
+5.4 Uploader logic heavily modified, then iterated, then fixed again (`uploader is working` commit).
+5.5 Bootlog and xattr cache behavior adjusted.
+5.6 MPP encoder support added (`mpp_encoder.*`) for KA2 encoding path.
+5.7 Deleter behavior tuned.
+5.8 Logger tests updated to match new behavior.
+
+## 6) Sensor stack and location prerequisites
+
+6.1 Sensord behavior adjusted for KA2.
+6.2 New ICM42670 accel/gyro/temp sensor drivers added.
+6.3 LIS2MDL magnetometer integration added.
+6.4 Mic/system utility processes adjusted to fit KA2 runtime.
+6.5 Feature flags/params keys expanded to support hardware + runtime toggles.
+
+## 7) Modeld runtime architecture migration (RKNN path)
+
+7.1 RKNN runtime integration added across modeld.
+7.2 New RKNN runner classes introduced for driving and dmonitoring.
+7.3 C++/Cython bindings added for RKNN model wrappers.
+7.4 New `.rknn` runtime model assets introduced.
+7.5 Build pipeline updated for RKNN libraries/headers and packaging.
+7.6 Thneed/runmodel/commonmodel interfaces refactored to support multiple runtimes.
+7.7 `navmodeld.py` introduced.
+7.8 Third-party dependencies updated (`libyuv`, `raylib`, `rknpu` headers/wheel).
+7.9 Later stabilization pass improved runtime paths and reduced noisy logging (`1511dd176`).
+
+## 8) Selfdrive controls and behavior changes (KA2 + DNGA)
+
+8.1 DNGA/Myvi-related control stack additions across car interfaces.
+8.2 Controls logic tuned (longitudinal + lateral helper updates).
+8.3 Conditional experimental mode logic added.
+8.4 Desire/lane-change helper behavior revised.
+8.5 Controlsd/plannerd interaction touched for KA2 paths.
+8.6 Event/audio mappings expanded with many new sound assets.
+8.7 Selfdrived events updated for new conditions.
+
+## 9) New streaming/app bridge service layer
+
+9.1 `selfdrive/streamdatad` service added with BLE helper and main daemon.
+9.2 Later restructuring moved streamdatad implementation into appbridged paths.
+9.3 Manager process definitions adjusted accordingly.
+
+## 10) UI, sound, and debug tooling evolution
+
+10.1 Sound daemon behavior changed multiple times (`selfdrive/ui/soundd.py`).
+10.2 UI build toggles/config adjusted.
+10.3 `tools/replay/ui_webrtc.py` and viewer added for debugging.
+10.4 Replay/video tooling expanded (`generate_ui_video.py`, UI helpers).
+10.5 Camera stream tooling docs/scripts updated.
+10.6 Debug cycle alerts tool heavily revised.
+
+## 11) Replay/log tooling and route processing changes
+
+11.1 `tools/lib/logreader.py` adjusted (important for replay and analysis behavior).
+11.2 Replay route internals changed (`route.cc`, `route.h`).
+11.3 Framereader/decoder changes to support new runtime/stream assumptions.
+11.4 Replay-based KA2 test assets updated (`selfdrive/test/test_ka2_onroad.py`).
+
+## 12) Build and SCons topology changes
+
+12.1 Root `SConstruct` and subsystem `SConscript` files updated for KA2.
+12.2 Common build utilities expanded (`clutil`, `rkutil`).
+12.3 Logger/model/selfdrive build paths changed for new components.
+12.4 New vendor repo build integration (`msgq_repo`) introduced.
+
+## 13) Messaging stack replacement/vendorization (`msgq_repo`)
+
+13.1 Full `msgq_repo` codebase imported as tracked files (IPC + messaging + vision IPC).
+13.2 Fake/real backend implementations added (`impl_fake`, `impl_msgq`, `impl_zmq`).
+13.3 Python bindings for IPC/vision IPC added.
+13.4 Unit/integration tests and build/test scripts included.
+13.5 This is one of the biggest architectural shifts in the range.
+
+## 14) Documentation and developer workflow updates
+
+14.1 KA2 model runtime guides added (RKNN, Mali/OpenCL optimization, loggerd MPP deps).
+14.2 Tooling docs for camera/replay/dev flows added or updated.
+14.3 Dependency install scripts removed, then restored (`restore dependencies`).
+14.4 Joystick tooling additions (ESP32/ESP helpers).
+
+## 15) Process scheduling and runtime process graph adjustments
+
+15.1 Process graph changed in `system/manager/process_config.py` multiple times.
+15.2 New always-run/onroad/offroad process roles for KA2 daemons.
+15.3 Runtime launch behavior tweaked for indicator/app bridge/stream-like services.
+15.4 RT scheduling and affinity touchpoints indirectly affected via daemon updates.
+
+## 16) Native/runtime binary and asset payload changes
+
+16.1 Large KA2 updater binary introduced (`system/hardware/ka2/updater`).
+16.2 New wave assets for alert events added in bulk.
+16.3 RKNN model payloads updated in multiple commits.
+
+## 17) High-impact rollback candidate clusters (for future pruning)
+
+17.1 Messaging architecture swap (`13`).
+17.2 Hardware/camera platform migration (`3` + `4`).
+17.3 Model runtime migration (`7`).
+17.4 Logger/upload/storage behavior (`5`).
+17.5 Control behavior + events/audio (`8` + `10`).
+17.6 Stream/app bridge service changes (`9`).
+17.7 Tooling/docs-only changes (`14`) - usually low risk to keep/remove.
+
+---
+
+## Quick “removal trial” order suggestion
+
+R1: docs/tooling only (`14` partial)  
+R2: UI/debug-only additions (`10.3`, `10.4`)  
+R3: stream/app bridge layer (`9`)  
+R4: sound/event asset bulk (`8.6`)  
+R5: uploader/logger refinements (`5.3`, `5.4`)  
+R6: model runtime stabilization layer (`7.9`)  
+R7: deeper model runtime migration (`7.1`..`7.8`)  
+R8: camera/hardware KA2 core migration (`3`, `4`)  
+R9: messaging vendorization (`13`) only if you are ready for large breakage risk
+
