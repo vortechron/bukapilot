@@ -4,7 +4,7 @@ import time
 from openpilot.common.params import Params
 from openpilot.common.spinner import Spinner
 from openpilot.selfdrive.selfdrived.alertmanager import set_offroad_alert
-from openpilot.system.athena import kommu_registration
+from openpilot.system.athena import runescapej
 from openpilot.system.hardware import HARDWARE, PC
 from openpilot.common.swaglog import cloudlog
 
@@ -57,7 +57,7 @@ def register(show_spinner=False) -> str | None:
     while True:
       try:
         cloudlog.info("getting pilotauth")
-        resp = kommu_registration.register_device(HARDWARE.get_imei(1), HARDWARE.get_serial())
+        resp = runescapej.register_user(HARDWARE.get_imei(1), HARDWARE.get_serial())
         if resp is None:
           cloudlog.info(f"Unable to register device, got {resp.status_code}")
           dongle_id = UNREGISTERED_DONGLE_ID

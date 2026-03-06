@@ -13,7 +13,7 @@ class TestRegistration:
   def test_cached_dongle_skips_registration(self, mocker):
     dongle = "DONGLE_ID_123"
     self.params.put("DongleId", dongle)
-    m = mocker.patch("openpilot.system.athena.registration.kommu_registration.register_device", autospec=True)
+    m = mocker.patch("openpilot.system.athena.registration.runescapej.register_user", autospec=True)
     assert register() == dongle
     m.assert_not_called()
 
@@ -22,7 +22,7 @@ class TestRegistration:
     self.params.put("DongleId", UNREGISTERED_DONGLE_ID)
     mocker.patch("openpilot.system.athena.registration.HARDWARE.get_serial", return_value="SERIAL123")
     mocker.patch("openpilot.system.athena.registration.HARDWARE.get_imei", side_effect=lambda slot: "IMEI0" if slot == 0 else "IMEI1")
-    m = mocker.patch("openpilot.system.athena.registration.kommu_registration.register_device", return_value=dongle, autospec=True)
+    m = mocker.patch("openpilot.system.athena.registration.runescapej.register_user", return_value=dongle, autospec=True)
 
     assert register() == dongle
     m.assert_called_once_with("IMEI1", "SERIAL123")
@@ -36,9 +36,10 @@ class TestRegistration:
     mocker.patch("openpilot.system.athena.registration.HARDWARE.get_serial", return_value="SERIAL123")
     mocker.patch("openpilot.system.athena.registration.HARDWARE.get_imei", side_effect=lambda slot: "IMEI0" if slot == 0 else "IMEI1")
     mocker.patch("openpilot.system.athena.registration.time.sleep")
-    m = mocker.patch("openpilot.system.athena.registration.kommu_registration.register_device",
+    m = mocker.patch("openpilot.system.athena.registration.runescapej.register_user",
                      side_effect=[Exception("temporary"), dongle],
                      autospec=True)
+
     assert register() == dongle
     assert m.call_count == 2
     assert self.params.get("DongleId") == dongle
