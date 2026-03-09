@@ -3,7 +3,6 @@ from openpilot.common.params import Params
 FEATURE_DELIMITER = ', '
 
 FEATURES = {
-  "ignore-dm",
   "lks-tactile",
   "stock-acc",
 }
@@ -31,8 +30,7 @@ def _process_feature_string(feature_string_input: str) -> str:
 
 def _get_features_param() -> str:
   """Safely retrieves the feature parameter as a string."""
-  raw = _get_params().get("FeaturesPackage") or b""
-  return raw.decode() if isinstance(raw, bytes) else raw
+  return _get_params().get("FeaturesPackage") or ""
 
 def _put_features_param(value: str) -> None:
   """Puts the feature parameter value."""
