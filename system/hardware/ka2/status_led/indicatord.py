@@ -84,6 +84,12 @@ class AlertLEDService:
                 active = bool(getattr(cs, "active", False))
                 alert_type = (getattr(cs, "alertType", "") or "")
 
+                # Personality toggle is informational; keep current LED state unchanged.
+                if alert_type.strip().lower() == "personalitychanged/warning":
+                    if self.debug:
+                        print("[indicatord] personalityChanged/warning -> keep previous LED state", flush=False)
+                    continue
+
                 color, mode, rate = self._classify_key(alert_type, active)
                 key = (color, mode, rate)
                 if key != self._last_key:

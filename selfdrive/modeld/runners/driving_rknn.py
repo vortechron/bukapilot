@@ -66,10 +66,16 @@ class DrivingRKNNRunner:
     vision_layout = os.getenv("RKNN_PY_VISION_LAYOUT", "nhwc").lower()
     if vision_layout not in ("nchw", "nhwc"):
       vision_layout = "nhwc"
+    self._vision_enforce_nchw = os.getenv("RKNN_ENFORCE_VISION_NCHW", "0") != "0"
+    if self._vision_enforce_nchw:
+      vision_layout = "nchw"
     self._vision_layout = vision_layout
     self._vision_pass_through = [vision_pt] * n_vision_in
     self._vision_data_format = [vision_fmt] * n_vision_in
     self._vision_use_explicit_format = os.getenv("RKNN_PY_VISION_EXPLICIT", "0") != "0"
+    self._nhwc_bigimg_affine_enable = os.getenv("RKNN_NHWC_BIGIMG_AFFINE_ENABLE", "1") != "0"
+    self._nhwc_bigimg_scale = float(os.getenv("RKNN_NHWC_BIGIMG_SCALE", "0.55"))
+    self._nhwc_bigimg_bias = float(os.getenv("RKNN_NHWC_BIGIMG_BIAS", "-6.0"))
 
     # Policy RKNN
     self._policy_rknn = RKNNLite(verbose=False)
@@ -85,9 +91,11 @@ class DrivingRKNNRunner:
   def run_vision(self, img: np.ndarray, big_img: np.ndarray) -> np.ndarray:
     """Run vision model. img and big_img are uint8; cast to float16 and run. Returns float32 (1, 1576)."""
     img_fp16 = np.ascontiguousarray(_to_fp16(img.reshape(self.vision_input_shapes["img"])))
-    big_img_fp16 = np.ascontiguousarray(_to_fp16(big_img.reshape(self.vision_input_shapes["big_img"])))
+    big_img_arr = big_img.reshape(self.vision_input_shapes["big_img"])
+    if self._vision_layout == "nhwc" and self._nhwc_bigimg_affine_enable:
+      big_img_arr = np.clip(big_img_arr.astype(np.float32) * self._nhwc_bigimg_scale + self._nhwc_bigimg_bias, 0.0, 255.0).astype(np.uint8)
+    big_img_fp16 = np.ascontiguousarray(_to_fp16(big_img_arr))
     if self._vision_layout == "nhwc":
-      # RKNN runtime on KA2 often expects NHWC feed for this model.
       img_fp16 = np.transpose(img_fp16, (0, 2, 3, 1))
       big_img_fp16 = np.transpose(big_img_fp16, (0, 2, 3, 1))
       img_fp16 = np.ascontiguousarray(img_fp16)

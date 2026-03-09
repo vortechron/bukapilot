@@ -53,6 +53,11 @@ std::string lower_copy(const char *s) {
   return out;
 }
 
+bool enforce_vision_nchw_contract() {
+  // Opt-in strict NCHW contract check for debugging/export validation.
+  return std::string(std::getenv("RKNN_ENFORCE_VISION_NCHW") ? std::getenv("RKNN_ENFORCE_VISION_NCHW") : "0") != "0";
+}
+
 int find_input_index(const std::vector<rknn_tensor_attr> &attrs, uint32_t n_input, const std::vector<std::string> &needles) {
   // Pass 1: exact name match.
   for (uint32_t i = 0; i < n_input; i++) {
@@ -84,7 +89,29 @@ const std::array<half, 256> &u8_to_half_lut() {
   return lut;
 }
 
-void fill_vision_input_half_from_u8(const unsigned char* src_nchw_u8, const rknn_tensor_attr &dst_attr, half* dst_half) {
+const std::array<half, 256> &u8_to_half_bigimg_affine_lut() {
+  // Empirical NHWC stabilization for big_img branch. Defaults can be overridden.
+  // y = clip(scale*x + bias, 0, 255)
+  static const std::array<half, 256> lut = [] {
+    const float scale = std::getenv("RKNN_NHWC_BIGIMG_SCALE") ? std::atof(std::getenv("RKNN_NHWC_BIGIMG_SCALE")) : 0.55f;
+    const float bias = std::getenv("RKNN_NHWC_BIGIMG_BIAS") ? std::atof(std::getenv("RKNN_NHWC_BIGIMG_BIAS")) : -6.0f;
+    std::array<half, 256> t = {};
+    for (int i = 0; i < 256; i++) {
+      float v = scale * static_cast<float>(i) + bias;
+      v = std::min(255.0f, std::max(0.0f, v));
+      t[i] = float_to_half(v);
+    }
+    return t;
+  }();
+  return lut;
+}
+
+bool nhwc_bigimg_affine_enabled() {
+  return std::string(std::getenv("RKNN_NHWC_BIGIMG_AFFINE_ENABLE") ? std::getenv("RKNN_NHWC_BIGIMG_AFFINE_ENABLE") : "1") != "0";
+}
+
+void fill_vision_input_half_from_u8(const unsigned char* src_nchw_u8, const rknn_tensor_attr &dst_attr, half* dst_half,
+                                    const std::array<half, 256> &lut) {
   // Modeld produces NCHW packed tensors (1,12,128,256).
   // Convert directly to model-native layout without temporary allocations.
   constexpr int N = 1;
@@ -93,8 +120,6 @@ void fill_vision_input_half_from_u8(const unsigned char* src_nchw_u8, const rknn
   constexpr int W = 256;
   constexpr int HW = H * W;
   constexpr int n = N * C * H * W;
-  const auto &lut = u8_to_half_lut();
-
   if (dst_attr.fmt == RKNN_TENSOR_NCHW) {
     // Unrolled hot loop: uint8 -> fp16 LUT conversion.
     int i = 0;
@@ -244,10 +269,20 @@ void DrivingRKNNModel::run_vision(const unsigned char* img, const unsigned char*
   const int idx_img = m->idx_img;
   const int idx_big = m->idx_big;
 
+  if (enforce_vision_nchw_contract()) {
+    if (m->input_attrs[idx_img].fmt != RKNN_TENSOR_NCHW || m->input_attrs[idx_big].fmt != RKNN_TENSOR_NCHW) {
+      LOGE("RKNN vision contract violation: expected NCHW inputs, got img fmt=%d big_img fmt=%d",
+           m->input_attrs[idx_img].fmt, m->input_attrs[idx_big].fmt);
+      assert(false);
+    }
+  }
+
   half* buf_img = m->input_bufs[idx_img].data();
   half* buf_big = m->input_bufs[idx_big].data();
-  fill_vision_input_half_from_u8(img, m->input_attrs[idx_img], buf_img);
-  fill_vision_input_half_from_u8(big_img, m->input_attrs[idx_big], buf_big);
+  const auto &lut_default = u8_to_half_lut();
+  const auto &lut_big = nhwc_bigimg_affine_enabled() ? u8_to_half_bigimg_affine_lut() : lut_default;
+  fill_vision_input_half_from_u8(img, m->input_attrs[idx_img], buf_img, lut_default);
+  fill_vision_input_half_from_u8(big_img, m->input_attrs[idx_big], buf_big, lut_big);
   RKNN_CHECK(rknn_inputs_set(m->ctx, m->io_num.n_input, m->rknn_inputs.data()));
   RKNN_CHECK(rknn_run(m->ctx, NULL));
   RKNN_CHECK(rknn_outputs_get(m->ctx, m->io_num.n_output, m->rknn_outputs.data(), NULL));

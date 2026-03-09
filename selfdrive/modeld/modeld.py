@@ -2,6 +2,7 @@
 import atexit
 import os
 import sys
+from collections import deque
 from openpilot.system.hardware import TICI, KA2, HARDWARE
 os.environ['DEV'] = 'QCOM' if TICI else ('CL' if KA2 else 'CPU')
 USBGPU = "USBGPU" in os.environ
@@ -53,11 +54,11 @@ VISION_PKL_PATH = MODEL_DIR / 'driving_vision_tinygrad.pkl'
 POLICY_PKL_PATH = MODEL_DIR / 'driving_policy_tinygrad.pkl'
 VISION_METADATA_PATH = MODEL_DIR / 'driving_vision_metadata.pkl'
 POLICY_METADATA_PATH = MODEL_DIR / 'driving_policy_metadata.pkl'
-VISION_RKNN_PATH = MODEL_DIR / 'driving_vision.rknn'
-POLICY_RKNN_PATH = MODEL_DIR / 'driving_policy.rknn'
+VISION_RKNN_PATH = MODEL_DIR / os.getenv("RKNN_VISION_MODEL", "driving_vision.rknn")
+POLICY_RKNN_PATH = MODEL_DIR / os.getenv("RKNN_POLICY_MODEL", "driving_policy.rknn")
 
 def _use_rknn_driving() -> bool:
-  """Use RKNN for driving model when both .rknn files exist (default). Set USE_RKNN=0 to force tinygrad."""
+  """Use RKNN for driving model when configured .rknn files exist (default). Set USE_RKNN=0 to force tinygrad."""
   if not (VISION_RKNN_PATH.exists() and POLICY_RKNN_PATH.exists()):
     return False
   return os.getenv('USE_RKNN', '1') != '0'
@@ -244,7 +245,7 @@ class ModelState:
     enqueue_write_buffer(cl_device, self._desire_buf, self._desire_append_offset, new_desire_mv)
 
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
-                inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
+                inputs: dict[str, np.ndarray], prepare_only: bool, frame_id: int | None = None) -> dict[str, np.ndarray] | None:
     # Model decides when action is completed, so desire input is just a pulse triggered on rising edge
     inputs['desire_pulse'][0] = 0
     new_desire = np.where(inputs['desire_pulse'] - self.prev_desire > .99, inputs['desire_pulse'], 0)
@@ -380,12 +381,94 @@ class ModelStateRKNN:
     self.vision_output = np.zeros(self._vision_output_size, dtype=np.float32)
     self.policy_output = np.zeros(self._policy_output_size, dtype=np.float32)
     self.parser = Parser()
+    # Temporary mitigation: suppress one-frame "straight blips" in RKNN plan output.
+    self._blip_guard_enabled = os.getenv("RKNN_BLIP_GUARD", "1") != "0"
+    self._blip_guard_context = 3
+    self._blip_guard_curved = 0.8
+    self._blip_guard_straight = 0.25
+    self._blip_guard_recent_y20 = deque(maxlen=self._blip_guard_context)
+    self._blip_guard_prev_plan_position: np.ndarray | None = None
+    self._blip_guard_prev_plan_stds_position: np.ndarray | None = None
+    self._stage_capture_dir = os.getenv("RKNN_STAGE_CAPTURE_DIR", "").strip()
+    self._stage_capture_window = int(os.getenv("RKNN_STAGE_CAPTURE_WINDOW", "0"))
+    ids_raw = os.getenv("RKNN_STAGE_CAPTURE_FRAME_IDS", "").strip()
+    self._stage_capture_ids = {
+      int(v.strip()) for v in ids_raw.split(",") if v.strip()
+    } if ids_raw else set()
+    self._stage_capture_enabled = bool(self._stage_capture_dir and self._stage_capture_ids)
+    if self._stage_capture_enabled:
+      Path(self._stage_capture_dir).mkdir(parents=True, exist_ok=True)
+      cloudlog.warning("modeld RKNN stage capture enabled: dir=%s frames=%s window=%d",
+                       self._stage_capture_dir, sorted(self._stage_capture_ids), self._stage_capture_window)
 
   def slice_outputs(self, model_outputs: np.ndarray, output_slices: dict[str, slice]) -> dict[str, np.ndarray]:
     return {k: model_outputs[np.newaxis, v] for k, v in output_slices.items()}
 
+  def _y_at_distance_from_plan(self, plan: np.ndarray, distance_m: float = 20.0) -> float | None:
+    x = np.asarray(plan[0, :, Plan.POSITION.start], dtype=np.float64)
+    y = np.asarray(plan[0, :, Plan.POSITION.start + 1], dtype=np.float64)
+    if x.size < 3 or y.size != x.size:
+      return None
+    if not np.all(np.diff(x) >= 0):
+      return None
+    if distance_m < x[0] or distance_m > x[-1]:
+      return None
+    return float(np.interp(distance_m, x, y))
+
+  def _apply_blip_guard(self, policy_outputs_dict: dict[str, np.ndarray]) -> None:
+    plan = policy_outputs_dict.get("plan", None)
+    plan_stds = policy_outputs_dict.get("plan_stds", None)
+    if plan is None or plan_stds is None:
+      return
+
+    y20 = self._y_at_distance_from_plan(plan)
+    if y20 is None:
+      return
+
+    should_guard = False
+    if len(self._blip_guard_recent_y20) >= self._blip_guard_context:
+      recent = list(self._blip_guard_recent_y20)
+      all_curved = all(abs(v) >= self._blip_guard_curved for v in recent)
+      same_side_curve = (min(recent) > 0.0) or (max(recent) < 0.0)
+      now_straight = abs(y20) < self._blip_guard_straight
+      should_guard = all_curved and same_side_curve and now_straight
+
+    if should_guard and self._blip_guard_prev_plan_position is not None and self._blip_guard_prev_plan_stds_position is not None:
+      plan[0, :, Plan.POSITION] = self._blip_guard_prev_plan_position
+      plan_stds[0, :, Plan.POSITION] = self._blip_guard_prev_plan_stds_position
+
+    self._blip_guard_prev_plan_position = plan[0, :, Plan.POSITION].copy()
+    self._blip_guard_prev_plan_stds_position = plan_stds[0, :, Plan.POSITION].copy()
+    y20_after = self._y_at_distance_from_plan(plan)
+    if y20_after is not None:
+      self._blip_guard_recent_y20.append(y20_after)
+
+  def _should_stage_capture(self, frame_id: int | None) -> bool:
+    if not self._stage_capture_enabled or frame_id is None:
+      return False
+    if frame_id in self._stage_capture_ids:
+      return True
+    w = self._stage_capture_window
+    return w > 0 and any(abs(frame_id - fid) <= w for fid in self._stage_capture_ids)
+
+  def _stage_capture(self, frame_id: int, img_np: np.ndarray, big_img_np: np.ndarray,
+                     vision_outputs_dict: dict[str, np.ndarray]) -> None:
+    out_path = Path(self._stage_capture_dir) / f"frame_{frame_id}.npz"
+    np.savez_compressed(
+      out_path,
+      frame_id=np.asarray(frame_id, dtype=np.int64),
+      img_input=img_np.copy(),
+      big_img_input=big_img_np.copy(),
+      desire_pulse_input=self.numpy_inputs["desire_pulse"].copy(),
+      traffic_convention_input=self.numpy_inputs["traffic_convention"].copy(),
+      features_buffer_input=self.numpy_inputs["features_buffer"].copy(),
+      vision_output_raw=self.vision_output.copy(),
+      policy_output_raw=self.policy_output.copy(),
+      hidden_state=vision_outputs_dict["hidden_state"].copy(),
+    )
+
   def run(self, bufs: dict[str, VisionBuf], transforms: dict[str, np.ndarray],
-          inputs: dict[str, np.ndarray], prepare_only: bool) -> dict[str, np.ndarray] | None:
+          inputs: dict[str, np.ndarray], prepare_only: bool, frame_id: int | None = None) -> dict[str, np.ndarray] | None:
     inputs['desire_pulse'][0] = 0
     new_desire = np.where(inputs['desire_pulse'] - self.prev_desire > .99, inputs['desire_pulse'], 0)
     self.prev_desire[:] = inputs['desire_pulse']
@@ -429,6 +512,10 @@ class ModelStateRKNN:
     policy_outputs_dict = self.parser.parse_policy_outputs(
       self.slice_outputs(self.policy_output, self.policy_output_slices)
     )
+    if self._should_stage_capture(frame_id):
+      self._stage_capture(frame_id, img_np, big_img_np, vision_outputs_dict)
+    if self._blip_guard_enabled:
+      self._apply_blip_guard(policy_outputs_dict)
 
     combined_outputs_dict = {**vision_outputs_dict, **policy_outputs_dict}
     if SEND_RAW_PRED:
@@ -455,7 +542,7 @@ def main(demo=False):
     set_external_cl_context(cl_context.context_ptr, cl_context.device_id_ptr, cl_context.queue_ptr)
   cloudlog.warning("CL context ready; loading model")
   if _use_rknn_driving():
-    cloudlog.warning("using RKNN driving runner (vision + policy); inputs cast to float16")
+    cloudlog.warning("using RKNN driving runner (vision=%s policy=%s); inputs cast to float16", VISION_RKNN_PATH.name, POLICY_RKNN_PATH.name)
     model = ModelStateRKNN(cl_context)
   else:
     override = " (USE_RKNN=0)" if (VISION_RKNN_PATH.exists() and POLICY_RKNN_PATH.exists()) else ""
@@ -596,7 +683,7 @@ def main(demo=False):
     }
 
     mt1 = time.perf_counter()
-    model_output = model.run(bufs, transforms, inputs, prepare_only)
+    model_output = model.run(bufs, transforms, inputs, prepare_only, frame_id)
     mt2 = time.perf_counter()
     model_execution_time = mt2 - mt1
 
