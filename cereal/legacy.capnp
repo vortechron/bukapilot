@@ -158,17 +158,9 @@ struct ECEFPoint @0xc25bbbd524983447 {
   z @2 :Float64;
 }
 
-struct ECEFPointDEPRECATED @0xe10e21168db0c7f7 {
-  x @0 :Float32;
-  y @1 :Float32;
-  z @2 :Float32;
-}
-
 struct GPSPlannerPoints @0xab54c59699f8f9f3 {
-  curPosDEPRECATED @0 :ECEFPointDEPRECATED;
-  pointsDEPRECATED @1 :List(ECEFPointDEPRECATED);
-  curPos @6 :ECEFPoint;
-  points @7 :List(ECEFPoint);
+  curPos @0 :ECEFPoint;
+  points @1 :List(ECEFPoint);
   valid @2 :Bool;
   trackName @3 :Text;
   speedLimit @4 :Float32;
@@ -181,17 +173,15 @@ struct GPSPlannerPlan @0xf5ad1d90cdc1dd6b {
   trackName @2 :Text;
   speed @3 :Float32;
   acceleration @4 :Float32;
-  pointsDEPRECATED @5 :List(ECEFPointDEPRECATED);
-  points @6 :List(ECEFPoint);
-  xLookahead @7 :Float32;
+  points @5 :List(ECEFPoint);
+  xLookahead @6 :Float32;
 }
 
 struct UiNavigationEvent @0x90c8426c3eaddd3b {
   type @0: Type;
   status @1: Status;
   distanceTo @2: Float32;
-  endRoadPointDEPRECATED @3: ECEFPointDEPRECATED;
-  endRoadPoint @4: ECEFPoint;
+  endRoadPoint @3: ECEFPoint;
 
   enum Type @0xe8db07dcf8fcea05 {
     none @0;
