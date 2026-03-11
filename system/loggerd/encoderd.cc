@@ -1,4 +1,5 @@
 #include <cassert>
+#include <sstream>
 
 #include "system/loggerd/loggerd.h"
 #include "system/loggerd/encoder/jpeg_encoder.h"
@@ -18,6 +19,22 @@
 ExitHandler do_exit;
 constexpr int ENCODER_VIPC_STALL_TIMEOUT_MS = 300;
 constexpr int ENCODER_REOPEN_FAILURE_THRESHOLD = 10;
+
+std::vector<int> parse_affinity_cores(const char *env_val) {
+  std::vector<int> cores;
+  if (env_val == nullptr || env_val[0] == '\0') return cores;
+
+  std::stringstream ss(env_val);
+  std::string token;
+  while (std::getline(ss, token, ',')) {
+    try {
+      if (!token.empty()) cores.push_back(std::stoi(token));
+    } catch (const std::exception&) {
+      // Ignore invalid affinity token and continue parsing.
+    }
+  }
+  return cores;
+}
 
 struct EncoderdState {
   int max_waiting = 0;
@@ -188,11 +205,20 @@ void encoderd_thread(const LogCameraInfo (&cameras)[N]) {
 
 int main(int argc, char* argv[]) {
   if (!Hardware::PC()) {
-    int ret;
-    ret = util::set_realtime_priority(52);
-    assert(ret == 0);
-    ret = util::set_core_affinity({3});
-    assert(ret == 0);
+    int ret = util::set_realtime_priority(52);
+    if (ret != 0) {
+      LOGW("failed to set encoderd realtime priority: %d", ret);
+    }
+
+    std::vector<int> affinity_cores = parse_affinity_cores(getenv("ENCODERD_AFFINITY"));
+    if (affinity_cores.empty()) {
+      // Avoid single-core pinning; default to a wider core set for better tail latency.
+      affinity_cores = {2, 3, 4, 5};
+    }
+    ret = util::set_core_affinity(affinity_cores);
+    if (ret != 0) {
+      LOGW("failed to set encoderd core affinity");
+    }
   }
   if (argc > 1) {
     std::string arg1(argv[1]);
