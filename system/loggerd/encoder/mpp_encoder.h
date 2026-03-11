@@ -32,12 +32,12 @@ private:
 
   rga_buffer_t src, dst;
 
-  MppCtx mpp_ctx;
-  MppApi *mpp_mpi;
-  MppFrame frame;
-  MppPacket packet;
-  MppEncCfg cfg;
-  MppBuffer mpp_buf;
+  MppCtx mpp_ctx = nullptr;
+  MppApi *mpp_mpi = nullptr;
+  MppFrame frame = nullptr;
+  MppPacket packet = nullptr;
+  MppEncCfg cfg = nullptr;
+  MppBuffer mpp_buf = nullptr;
 
-  void *downscale_buf;
+  void *downscale_buf = nullptr;
 };

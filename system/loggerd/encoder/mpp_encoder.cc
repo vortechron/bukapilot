@@ -28,6 +28,9 @@ MppEncoder::MppEncoder(const EncoderInfo &encoder_info, int in_width, int in_hei
 
     if (is_downscale) {
       downscale_buf = malloc(alw * alh * 3 / 2);
+      if (downscale_buf == nullptr) {
+        LOGE("failed to allocate downscale buffer (%d bytes)", alw * alh * 3 / 2);
+      }
     }
 }
 
@@ -45,16 +48,35 @@ void MppEncoder::encoder_open() {
 }
 
 void MppEncoder::encoder_open(const char* path) {
+    encoder_close();
+
     EncoderSettings settings = encoder_info.get_settings(in_width);
-    assert(mpp_create(&mpp_ctx, &mpp_mpi) == MPP_OK);
+    if (mpp_create(&mpp_ctx, &mpp_mpi) != MPP_OK) {
+      LOGE("mpp_create failed for %s", path);
+      mpp_ctx = nullptr;
+      mpp_mpi = nullptr;
+      return;
+    }
     LOGD("opened [%d %d %d %d] fps %d %s bitrate %d", in_width, in_height,
         out_width, out_height, encoder_info.fps,
         encoder_info.filename, settings.bitrate);
 
     if (settings.encode_type == cereal::EncodeIndex::Type::QCAMERA_H264) {
-      assert(mpp_init(mpp_ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC) == MPP_OK);
-      mpp_enc_cfg_init(&cfg);
-      mpp_mpi->control(mpp_ctx, MPP_ENC_GET_CFG, cfg);
+      if (mpp_init(mpp_ctx, MPP_CTX_ENC, MPP_VIDEO_CodingAVC) != MPP_OK) {
+        LOGE("mpp_init AVC failed for %s", path);
+        encoder_close();
+        return;
+      }
+      if (mpp_enc_cfg_init(&cfg) != MPP_OK) {
+        LOGE("mpp_enc_cfg_init AVC failed for %s", path);
+        encoder_close();
+        return;
+      }
+      if (mpp_mpi->control(mpp_ctx, MPP_ENC_GET_CFG, cfg) != MPP_OK) {
+        LOGE("MPP_ENC_GET_CFG AVC failed for %s", path);
+        encoder_close();
+        return;
+      }
       mpp_enc_cfg_set_u32(cfg, "codec:type", MPP_VIDEO_CodingAVC);
       mpp_enc_cfg_set_s32(cfg, "split:mode", MPP_ENC_SPLIT_NONE);
 
@@ -77,12 +99,28 @@ void MppEncoder::encoder_open(const char* path) {
       mpp_enc_cfg_set_s32(cfg, "rc:qp_ip", 6);
     }
     else if (settings.encode_type == cereal::EncodeIndex::Type::FULL_H_E_V_C) {
-      assert(mpp_init(mpp_ctx, MPP_CTX_ENC, MPP_VIDEO_CodingHEVC) == MPP_OK);
-      mpp_enc_cfg_init(&cfg);
-      mpp_mpi->control(mpp_ctx, MPP_ENC_GET_CFG, cfg);
+      if (mpp_init(mpp_ctx, MPP_CTX_ENC, MPP_VIDEO_CodingHEVC) != MPP_OK) {
+        LOGE("mpp_init HEVC failed for %s", path);
+        encoder_close();
+        return;
+      }
+      if (mpp_enc_cfg_init(&cfg) != MPP_OK) {
+        LOGE("mpp_enc_cfg_init HEVC failed for %s", path);
+        encoder_close();
+        return;
+      }
+      if (mpp_mpi->control(mpp_ctx, MPP_ENC_GET_CFG, cfg) != MPP_OK) {
+        LOGE("MPP_ENC_GET_CFG HEVC failed for %s", path);
+        encoder_close();
+        return;
+      }
       mpp_enc_cfg_set_u32(cfg, "codec:type", MPP_VIDEO_CodingHEVC);
     }
-    else { return; }
+    else {
+      LOGE("unsupported encode type %d for %s", (int)settings.encode_type, path);
+      encoder_close();
+      return;
+    }
 
     mpp_enc_cfg_set_s32(cfg, "prep:width", out_width);
     mpp_enc_cfg_set_s32(cfg, "prep:height", out_height);
@@ -96,7 +134,11 @@ void MppEncoder::encoder_open(const char* path) {
     mpp_enc_cfg_set_s32(cfg, "rc:bps_max", settings.bitrate + 100000);
     mpp_enc_cfg_set_s32(cfg, "rc:bps_min", settings.bitrate - 100000);
     mpp_enc_cfg_set_u32(cfg, "rc:gop", 90); // keyframe interval 2-second GOP for 30 FPS
-    mpp_mpi->control(mpp_ctx, MPP_ENC_SET_CFG, cfg);
+    if (mpp_mpi->control(mpp_ctx, MPP_ENC_SET_CFG, cfg) != MPP_OK) {
+      LOGE("MPP_ENC_SET_CFG failed for %s", path);
+      encoder_close();
+      return;
+    }
 
     is_open = true;
     segment_num++;
@@ -105,17 +147,39 @@ void MppEncoder::encoder_open(const char* path) {
 
 void MppEncoder::encoder_close() {
     if (!is_open) return;
-    mpp_destroy(mpp_ctx);
+    if (cfg != nullptr) {
+      mpp_enc_cfg_deinit(cfg);
+      cfg = nullptr;
+    }
+    if (mpp_ctx != nullptr) {
+      mpp_destroy(mpp_ctx);
+      mpp_ctx = nullptr;
+      mpp_mpi = nullptr;
+    }
     is_open = false;
 }
 
 int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
-    assert(buf->width == this->in_width);
-    assert(buf->height == this->in_height);
+    if (!is_open || mpp_ctx == nullptr || mpp_mpi == nullptr) {
+      return -1;
+    }
+    if (buf->width != this->in_width || buf->height != this->in_height) {
+      LOGE("input size mismatch: got %zux%zu expected %dx%d",
+           buf->width, buf->height, this->in_width, this->in_height);
+      return -1;
+    }
 
     // Allocate & populate frame buffer
-    assert(mpp_buffer_get(NULL, &mpp_buf, alw * alh * 3 / 2) == MPP_OK);
-    mpp_frame_init(&frame);
+    if (mpp_buffer_get(NULL, &mpp_buf, alw * alh * 3 / 2) != MPP_OK) {
+      LOGE("mpp_buffer_get failed");
+      return -1;
+    }
+    if (mpp_frame_init(&frame) != MPP_OK) {
+      LOGE("mpp_frame_init failed");
+      mpp_buffer_put(mpp_buf);
+      mpp_buf = nullptr;
+      return -1;
+    }
     mpp_frame_set_width(frame, buf->width);
     mpp_frame_set_height(frame, buf->height);
     mpp_frame_set_hor_stride(frame, alw);
@@ -123,9 +187,22 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
     mpp_frame_set_fmt(frame, MPP_FMT_YUV420SP);
 
     if (is_downscale) {
+      if (downscale_buf == nullptr) {
+        LOGE("downscale buffer is null");
+        mpp_frame_deinit(&frame);
+        mpp_buffer_put(mpp_buf);
+        mpp_buf = nullptr;
+        return -1;
+      }
       src = wrapbuffer_virtualaddr(buf->addr, buf->width, buf->height, RK_FORMAT_YCbCr_420_SP);
       dst = wrapbuffer_virtualaddr(downscale_buf, alw, alh, RK_FORMAT_YCbCr_420_SP);
-      assert(imresize(src, dst, (double)out_width/buf->width, (double)out_height/buf->height, IM_SYNC) >= 0);
+      if (imresize(src, dst, (double)out_width / buf->width, (double)out_height / buf->height, IM_SYNC) < 0) {
+        LOGE("imresize failed");
+        mpp_frame_deinit(&frame);
+        mpp_buffer_put(mpp_buf);
+        mpp_buf = nullptr;
+        return -1;
+      }
       memcpy(mpp_buffer_get_ptr(mpp_buf), downscale_buf, alw * alh * 3 / 2);
     }
     else {
@@ -136,11 +213,13 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
     if (mpp_mpi->encode_put_frame(mpp_ctx, frame) != MPP_OK) {
       mpp_frame_deinit(&frame);
       mpp_buffer_put(mpp_buf);
+      mpp_buf = nullptr;
       return -1;
     }
     mpp_frame_deinit(&frame);
     if (mpp_mpi->encode_get_packet(mpp_ctx, &packet) != MPP_OK) {
       mpp_buffer_put(mpp_buf);
+      mpp_buf = nullptr;
       return -1;
     }
 
@@ -158,7 +237,9 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
 
     counter++;
     mpp_packet_deinit(&packet);
+    packet = nullptr;
     mpp_buffer_put(mpp_buf);
+    mpp_buf = nullptr;
     return 1;
 }
 

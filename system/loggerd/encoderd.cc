@@ -71,7 +71,11 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
     if (encoders.empty()) {
       const VisionBuf &buf_info = vipc_client.buffers[0];
       LOGW("encoder %s init %zux%zu", cam_info.thread_name, buf_info.width, buf_info.height);
-      assert(buf_info.width > 0 && buf_info.height > 0);
+      if (buf_info.width == 0 || buf_info.height == 0) {
+        LOGE("encoder %s got invalid buffer dimensions %zux%zu, reconnecting",
+             cam_info.thread_name, buf_info.width, buf_info.height);
+        break;
+      }
 
       for (const auto &encoder_info : cam_info.encoder_infos) {
         auto &e = encoders.emplace_back(new Encoder(encoder_info, buf_info.width, buf_info.height));
