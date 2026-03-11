@@ -135,6 +135,8 @@ class Soundd:
     data_out[:frames, 0] = self.get_sound_data(frames)
 
   def update_alert(self, new_alert, quiet_mode=False, alert_type_name=None):
+    if quiet_mode and alert_type_name and "laneChangeBlocked" in alert_type_name:
+      return
     if quiet_mode and new_alert != AudibleAlert.refuse:
       allowed = new_alert in {
         AudibleAlert.none,
