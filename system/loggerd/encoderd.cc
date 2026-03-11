@@ -2,6 +2,7 @@
 
 #include "system/loggerd/loggerd.h"
 #include "system/loggerd/encoder/jpeg_encoder.h"
+#include "common/timing.h"
 
 #if defined(__TICI__) || defined(QCOM2)
 #include "system/loggerd/encoder/v4l_encoder.h"
@@ -15,6 +16,7 @@
 #endif
 
 ExitHandler do_exit;
+constexpr int ENCODER_VIPC_STALL_TIMEOUT_MS = 300;
 
 struct EncoderdState {
   int max_waiting = 0;
@@ -81,10 +83,23 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
     }
 
     bool lagging = false;
+    double last_frame_seen_tms = millis_since_boot();
     while (!do_exit) {
       VisionIpcBufExtra extra;
       VisionBuf* buf = vipc_client.recv(&extra);
-      if (buf == nullptr) continue;
+      if (buf == nullptr) {
+        const double now_tms = millis_since_boot();
+        const bool stalled = (now_tms - last_frame_seen_tms) > ENCODER_VIPC_STALL_TIMEOUT_MS;
+        if (!vipc_client.is_connected() || stalled) {
+          LOGE("encoder %s reconnecting vipc (%s, no frame for %.1f ms)",
+               cam_info.thread_name,
+               vipc_client.is_connected() ? "stalled" : "disconnected",
+               (now_tms - last_frame_seen_tms));
+          break;
+        }
+        continue;
+      }
+      last_frame_seen_tms = millis_since_boot();
 
       // detect loop around and drop the frames
       if (buf->get_frame_id() != extra.frame_id) {
