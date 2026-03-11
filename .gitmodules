@@ -16,3 +16,6 @@
 [submodule "panda"]
   path = panda
   url = https://github.com/kommuai/panda
+[submodule "msgq_repo"]
+	path = msgq_repo
+	url = https://github.com/kommuai/msgq
