@@ -17,7 +17,6 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
-from openpilot.selfdrive.controls.lib.alc_helper import ALCHelper
 from openpilot.selfdrive.controls.conditional_experimental_mode import ConditionalExperimentalMode
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
@@ -49,8 +48,6 @@ class Controls:
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
-    self.alc_helper = ALCHelper()
-    self.alc_active = False
     self.cem = ConditionalExperimentalMode()
 
     self.LoC = LongControl(self.CP)
@@ -92,8 +89,6 @@ class Controls:
 
     long_plan = self.sm['longitudinalPlan']
     model_v2 = self.sm['modelV2']
-    one_blinker = CS.leftBlinker != CS.rightBlinker
-    self.alc_active = self.alc_helper.update(CS, one_blinker, model_v2.meta.laneChangeState, self.sm['selfdriveState'].active)
 
     self.cem.update(self.sm['carState'], self.sm['radarState'].leadOne, self.sm['modelV2'], self.sm['selfdriveState'])
 
