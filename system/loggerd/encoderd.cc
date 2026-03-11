@@ -17,6 +17,7 @@
 
 ExitHandler do_exit;
 constexpr int ENCODER_VIPC_STALL_TIMEOUT_MS = 300;
+constexpr int ENCODER_REOPEN_FAILURE_THRESHOLD = 10;
 
 struct EncoderdState {
   int max_waiting = 0;
@@ -54,6 +55,7 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
   util::set_thread_name(cam_info.thread_name);
 
   std::vector<std::unique_ptr<Encoder>> encoders;
+  std::vector<int> encode_failure_counts;
   VisionIpcClient vipc_client = VisionIpcClient("camerad", cam_info.stream_type, false);
 
   std::unique_ptr<JpegEncoder> jpeg_encoder;
@@ -74,6 +76,7 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
       for (const auto &encoder_info : cam_info.encoder_infos) {
         auto &e = encoders.emplace_back(new Encoder(encoder_info, buf_info.width, buf_info.height));
         e->encoder_open();
+        encode_failure_counts.emplace_back(0);
       }
 
       // Only one thumbnail can be generated per camera stream
@@ -131,7 +134,17 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
         int out_id = encoders[i]->encode_frame(buf, &extra);
 
         if (out_id == -1) {
+          encode_failure_counts[i]++;
           LOGE("Failed to encode frame. frame_id: %d", extra.frame_id);
+          if (encode_failure_counts[i] >= ENCODER_REOPEN_FAILURE_THRESHOLD) {
+            LOGE("encoder %s stream %d exceeded failure threshold (%d), reopening",
+                 cam_info.thread_name, i, ENCODER_REOPEN_FAILURE_THRESHOLD);
+            encoders[i]->encoder_close();
+            encoders[i]->encoder_open();
+            encode_failure_counts[i] = 0;
+          }
+        } else {
+          encode_failure_counts[i] = 0;
         }
       }
 
