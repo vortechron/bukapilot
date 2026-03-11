@@ -22,6 +22,11 @@ MppEncoder::MppEncoder(const EncoderInfo &encoder_info, int in_width, int in_hei
     if (in_width != out_width || in_height != out_height) {
       is_downscale = true;
     }
+    // Zero-copy import is only feasible when we don't need RGA downscale.
+    use_zero_copy = !is_downscale;
+    if (const char *zero_copy_env = getenv("ENCODER_ZERO_COPY")) {
+      use_zero_copy = atoi(zero_copy_env) != 0 && !is_downscale;
+    }
 
     alw = is_downscale ? MPP_ALIGN(out_width, 16) : MPP_ALIGN(in_width, 16);
     alh = is_downscale ? MPP_ALIGN(out_height, 16) : in_height;
@@ -140,26 +145,35 @@ void MppEncoder::encoder_open(const char* path) {
       return;
     }
 
-    if (mpp_buffer_group_get_internal(&frame_buf_group, MPP_BUFFER_TYPE_DRM) != MPP_OK) {
-      LOGE("mpp_buffer_group_get_internal failed for %s", path);
-      encoder_close();
-      return;
-    }
-    for (size_t i = 0; i < frame_buffers.size(); ++i) {
-      if (mpp_buffer_get(frame_buf_group, &frame_buffers[i], alw * alh * 3 / 2) != MPP_OK) {
-        LOGE("mpp_buffer_get prealloc failed for %s idx %zu", path, i);
+    if (!use_zero_copy) {
+      if (mpp_buffer_group_get_internal(&frame_buf_group, MPP_BUFFER_TYPE_DRM) != MPP_OK) {
+        LOGE("mpp_buffer_group_get_internal failed for %s", path);
         encoder_close();
         return;
       }
+      for (size_t i = 0; i < frame_buffers.size(); ++i) {
+        if (mpp_buffer_get(frame_buf_group, &frame_buffers[i], alw * alh * 3 / 2) != MPP_OK) {
+          LOGE("mpp_buffer_get prealloc failed for %s idx %zu", path, i);
+          encoder_close();
+          return;
+        }
+      }
+      frame_buffer_idx = 0;
     }
-    frame_buffer_idx = 0;
 
     is_open = true;
     segment_num++;
     counter = 0;
+    LOGD("mpp encoder mode: %s", use_zero_copy ? "zero-copy" : "copy");
 }
 
 void MppEncoder::encoder_close() {
+    for (auto &[fd, buf] : imported_buffers) {
+      if (buf != nullptr) {
+        mpp_buffer_put(buf);
+      }
+    }
+    imported_buffers.clear();
     for (auto &buf : frame_buffers) {
       if (buf != nullptr) {
         mpp_buffer_put(buf);
@@ -202,11 +216,47 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
       return -1;
     }
 
-    // Reuse preallocated frame buffers to avoid per-frame allocator overhead.
-    mpp_buf = acquire_frame_buffer();
+    if (use_zero_copy) {
+      auto it = imported_buffers.find(buf->fd);
+      if (it == imported_buffers.end()) {
+        MppBuffer imported = nullptr;
+        MppBufferInfo info = {};
+        info.type = MPP_BUFFER_TYPE_EXT_DMA;
+        info.fd = buf->fd;
+        info.size = alw * alh * 3 / 2;
+        info.ptr = buf->addr;
+        if (mpp_buffer_import(&imported, &info) != MPP_OK) {
+          LOGE("mpp_buffer_import failed, falling back to copy path");
+          use_zero_copy = false;
+          if (frame_buf_group == nullptr) {
+            if (mpp_buffer_group_get_internal(&frame_buf_group, MPP_BUFFER_TYPE_DRM) != MPP_OK) {
+              LOGE("fallback mpp_buffer_group_get_internal failed");
+              return -1;
+            }
+            for (size_t i = 0; i < frame_buffers.size(); ++i) {
+              if (mpp_buffer_get(frame_buf_group, &frame_buffers[i], alw * alh * 3 / 2) != MPP_OK) {
+                LOGE("fallback mpp_buffer_get prealloc failed idx %zu", i);
+                return -1;
+              }
+            }
+            frame_buffer_idx = 0;
+          }
+        } else {
+          imported_buffers.emplace(buf->fd, imported);
+          mpp_buf = imported;
+        }
+      } else {
+        mpp_buf = it->second;
+      }
+    }
+
     if (mpp_buf == nullptr) {
-      LOGE("no preallocated mpp frame buffer available");
-      return -1;
+      // Reuse preallocated frame buffers to avoid per-frame allocator overhead.
+      mpp_buf = acquire_frame_buffer();
+      if (mpp_buf == nullptr) {
+        LOGE("no preallocated mpp frame buffer available");
+        return -1;
+      }
     }
     if (mpp_frame_init(&frame) != MPP_OK) {
       LOGE("mpp_frame_init failed");
@@ -236,7 +286,7 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
       }
       memcpy(mpp_buffer_get_ptr(mpp_buf), downscale_buf, alw * alh * 3 / 2);
     }
-    else {
+    else if (!use_zero_copy) {
       memcpy(mpp_buffer_get_ptr(mpp_buf), buf->addr, alw * alh * 3 / 2);
     }
 

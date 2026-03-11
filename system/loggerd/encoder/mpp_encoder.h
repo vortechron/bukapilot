@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <unordered_map>
 
 #include "system/loggerd/encoder/encoder.h"
 #include "system/loggerd/loggerd.h"
@@ -29,6 +30,7 @@ private:
   int counter = 0;
   bool is_open = false;
   bool is_downscale = false;
+  bool use_zero_copy = false;
 
   int alw, alh;
 
@@ -44,6 +46,7 @@ private:
   static constexpr size_t FRAME_BUFFER_POOL_SIZE = 6;
   std::array<MppBuffer, FRAME_BUFFER_POOL_SIZE> frame_buffers = {};
   size_t frame_buffer_idx = 0;
+  std::unordered_map<int, MppBuffer> imported_buffers;
 
   void *downscale_buf = nullptr;
 };
