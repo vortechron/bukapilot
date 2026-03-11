@@ -357,9 +357,8 @@ class Streamer:
         case 'saveToggle':
           safe_put_all(settings, True)
         case 'saveConfig':
-          car_name = settings.pop('CarName', None) or settings.pop('carName', None)
-          if car_name is not None:
-            safe_put_all({'CarName': car_name})
+          if (car_name := settings.pop('CarName', None)) is not None:
+            safe_put_all({"CarName": car_name})
           if (features_to_set := settings.pop('FeaturesPackage', None)) is not None:
             features.set_features(features_to_set)
           if (apn := settings.pop('GsmApn', None)) is not None:
