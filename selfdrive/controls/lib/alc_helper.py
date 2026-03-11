@@ -12,7 +12,8 @@ class ALCHelper:
     self.prev_enough_lane_change_speed = False    # If the previous speed was enough for ALC
     self.blinker_has_lane_change = False          # If there was any ALC lane change while the blinker was on
 
-  def update(self, carstate, one_blinker, lc_state, active):
+  def update(self, carstate, lc_state, active):
+    one_blinker = carstate.leftBlinker != carstate.rightBlinker
     changing_lanes = lc_state in (LaneChangeState.laneChangeStarting, LaneChangeState.laneChangeFinishing)
     below_lane_change_speed = carstate.vEgo < LANE_CHANGE_SPEED_MIN
     lat_active = active and not carstate.lkaDisabled

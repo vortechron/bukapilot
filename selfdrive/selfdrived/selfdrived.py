@@ -24,6 +24,8 @@ from openpilot.selfdrive.selfdrived.alertmanager import AlertManager, set_offroa
 from openpilot.system.version import get_build_metadata
 from openpilot.system.hardware import HARDWARE
 
+from openpilot.selfdrive.controls.lib.alc_helper import ALCHelper
+
 REPLAY = "REPLAY" in os.environ
 SIMULATION = "SIMULATION" in os.environ
 TESTING_CLOSET = "TESTING_CLOSET" in os.environ
@@ -142,6 +144,9 @@ class SelfdriveD:
     elif self.CP.passive:
       self.events.add(EventName.dashcamMode, static=True)
 
+    self.alc_helper = ALCHelper()
+    self.alc_active = False
+
   def update_events(self, CS):
     """Compute onroadEvents from carState"""
 
@@ -256,8 +261,10 @@ class SelfdriveD:
       self.events.add(EventName.excessiveActuation)
     # ******************************************************************************************
 
+    self.alc_active = self.alc_helper.update(CS, self.sm['modelV2'].meta.laneChangeState, self.active)
+
     # Handle lane change
-    if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange:
+    if self.sm['modelV2'].meta.laneChangeState == LaneChangeState.preLaneChange and self.alc_active:
       direction = self.sm['modelV2'].meta.laneChangeDirection
       if (CS.leftBlindspot and direction == LaneChangeDirection.left) or \
          (CS.rightBlindspot and direction == LaneChangeDirection.right):
@@ -268,7 +275,7 @@ class SelfdriveD:
         else:
           self.events.add(EventName.preLaneChangeRight)
     elif self.sm['modelV2'].meta.laneChangeState in (LaneChangeState.laneChangeStarting,
-                                                    LaneChangeState.laneChangeFinishing):
+                                                    LaneChangeState.laneChangeFinishing) and self.alc_active:
       self.events.add(EventName.laneChange)
 
     for i, pandaState in enumerate(self.sm['pandaStates']):
@@ -407,6 +414,10 @@ class SelfdriveD:
         self.params.put_nonblocking('LongitudinalPersonality', self.personality)
         self.events.add(EventName.personalityChanged)
 
+    # Send an alert when turn signal is on (ALC not active or ALC disabled)
+    if self.enabled and not self.active and CS.leftBlinker != CS.rightBlinker and not CS.standstill and not CS.lkaDisabled:
+      self.events.add(EventName.blinkerSteerRequired)
+
   def data_sample(self):
     _car_state = messaging.recv_one(self.car_state_sock)
     CS = _car_state.carState if _car_state else self.CS_prev
@@ -502,6 +513,7 @@ class SelfdriveD:
     self.update_events(CS)
     if not self.CP.passive and self.initialized:
       self.enabled, self.active = self.state_machine.update(self.events)
+    self.active = self.active and (self.alc_active or CS.leftBlinker == CS.rightBlinker) and not CS.lkaDisabled
     self.update_alerts(CS)
 
     self.publish_selfdriveState(CS)
