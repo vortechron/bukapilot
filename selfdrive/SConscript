@@ -1,4 +1,4 @@
-Import('device')
+Import('device', 'build_gui')
 
 SConscript(['pandad/SConscript'])
 SConscript(['controls/lib/lateral_mpc_lib/SConscript'])
@@ -7,5 +7,5 @@ SConscript(['locationd/SConscript'])
 SConscript(['modeld/SConscript'])
 
 # No UI on KA2 (headless / no raylib or installer build).
-if device != 'KA2':
+if build_gui:
   SConscript(['ui/SConscript'])

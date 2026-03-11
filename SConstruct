@@ -44,6 +44,9 @@ assert arch in [
 ]
 # Device type for build-time choices (e.g. visionbuf_ion only on TICI)
 device = os.environ.get('OPENPILOT_DEVICE', 'TICI' if TICI else 'KA2' if arch == 'larch64' else '')
+# GUI/raylib/Qt targets are unnecessary on headless KA2.
+# Can also be forced off with OPENPILOT_BUILD_GUI=0.
+build_gui = (os.environ.get('OPENPILOT_BUILD_GUI', '1') == '1') and (device != 'KA2')
 
 env = Environment(
   ENV={
@@ -177,7 +180,7 @@ else:
 np_version = SCons.Script.Value(np.__version__)
 Export('envCython', 'np_version')
 
-Export('env', 'arch', 'device')
+Export('env', 'arch', 'device', 'build_gui')
 
 # Setup cache dir
 cache_dir = '/data/scons_cache' if arch == "larch64" else '/tmp/scons_cache'
@@ -228,7 +231,7 @@ SConscript(['selfdrive/SConscript'])
 # Replay is useful for KA2 debugging as well; keep cabana limited by arch.
 if Dir('#tools/cabana/').exists() and GetOption('extras'):
   SConscript(['tools/replay/SConscript'])
-  if arch != "larch64":
+  if arch != "larch64" and build_gui:
     SConscript(['tools/cabana/SConscript'])
 
 
