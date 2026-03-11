@@ -17,6 +17,8 @@ from openpilot.selfdrive.controls.lib.latcontrol_pid import LatControlPID
 from openpilot.selfdrive.controls.lib.latcontrol_angle import LatControlAngle, STEER_ANGLE_SATURATION_THRESHOLD
 from openpilot.selfdrive.controls.lib.latcontrol_torque import LatControlTorque
 from openpilot.selfdrive.controls.lib.longcontrol import LongControl
+from openpilot.selfdrive.controls.lib.alc_helper import ALCHelper
+from openpilot.selfdrive.controls.conditional_experimental_mode import ConditionalExperimentalMode
 from openpilot.selfdrive.modeld.modeld import LAT_SMOOTH_SECONDS
 from openpilot.selfdrive.locationd.helpers import PoseCalibrator, Pose
 
@@ -38,7 +40,7 @@ class Controls:
 
     self.sm = messaging.SubMaster(['liveDelay', 'liveParameters', 'liveTorqueParameters', 'modelV2', 'selfdriveState',
                                    'liveCalibration', 'livePose', 'longitudinalPlan', 'carState', 'carOutput',
-                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance'], poll='selfdriveState')
+                                   'driverMonitoringState', 'onroadEvents', 'driverAssistance', 'radarState'], poll='selfdriveState')
     self.pm = messaging.PubMaster(['carControl', 'controlsState'])
 
     self.steer_limited_by_safety = False
@@ -47,6 +49,9 @@ class Controls:
 
     self.pose_calibrator = PoseCalibrator()
     self.calibrated_pose: Pose | None = None
+    self.alc_helper = ALCHelper()
+    self.alc_active = False
+    self.cem = ConditionalExperimentalMode()
 
     self.LoC = LongControl(self.CP)
     self.VM = VehicleModel(self.CP)
@@ -87,6 +92,10 @@ class Controls:
 
     long_plan = self.sm['longitudinalPlan']
     model_v2 = self.sm['modelV2']
+    one_blinker = CS.leftBlinker != CS.rightBlinker
+    self.alc_active = self.alc_helper.update(CS, one_blinker, model_v2.meta.laneChangeState, self.sm['selfdriveState'].active)
+
+    self.cem.update(self.sm['carState'], self.sm['radarState'].leadOne, self.sm['modelV2'], self.sm['selfdriveState'])
 
     CC = car.CarControl.new_message()
     CC.enabled = self.sm['selfdriveState'].enabled

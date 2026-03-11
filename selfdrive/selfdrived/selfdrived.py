@@ -80,12 +80,18 @@ class SelfdriveD:
     if REPLAY:
       # no vipc in replay will make them ignored anyways
       ignore += ['roadCameraState', 'wideRoadCameraState']
+
+    ignore_avg_freq = list(ignore)
+    if HARDWARE.get_device_type() == "ka2":
+      # KA2 can run DM below nominal rate; keep alive/valid checks, relax avg-freq only.
+      ignore_avg_freq += ['driverMonitoringState']
+
     self.sm = messaging.SubMaster(['deviceState', 'pandaStates', 'peripheralState', 'modelV2', 'liveCalibration',
                                    'carOutput', 'driverMonitoringState', 'longitudinalPlan', 'livePose', 'liveDelay',
                                    'managerState', 'liveParameters', 'radarState', 'liveTorqueParameters',
                                    'controlsState', 'carControl', 'driverAssistance', 'alertDebug', 'userBookmark', 'audioFeedback'] + \
                                    self.camera_packets + self.sensor_packets + self.gps_packets,
-                                  ignore_alive=ignore, ignore_avg_freq=ignore,
+                                  ignore_alive=ignore, ignore_avg_freq=ignore_avg_freq,
                                   ignore_valid=ignore, frequency=int(1/DT_CTRL))
 
     # read params
@@ -206,8 +212,8 @@ class SelfdriveD:
     if self.sm['deviceState'].memoryUsagePercent > 90 and not SIMULATION:
       self.events.add(EventName.lowMemory)
 
-    # Alert if fan isn't spinning for 5 seconds
-    if self.sm['peripheralState'].pandaType != log.PandaState.PandaType.unknown:
+    # Alert if fan isn't spinning for 5 seconds (KA2 has no fan, skip)
+    if HARDWARE.get_device_type() != "ka2" and self.sm['peripheralState'].pandaType != log.PandaState.PandaType.unknown:
       if self.sm['peripheralState'].fanSpeedRpm < 500 and self.sm['deviceState'].fanSpeedPercentDesired > 50:
         # allow enough time for the fan controller in the panda to recover from stalls
         if (self.sm.frame - self.last_functional_fan_frame) * DT_CTRL > 15.0:
@@ -397,7 +403,10 @@ class SelfdriveD:
     # Decrement personality on distance button press
     if self.CP.openpilotLongitudinalControl:
       if any(not be.pressed and be.type == ButtonType.gapAdjustCruise for be in CS.buttonEvents):
-        self.personality = (self.personality - 1) % 3
+        if CS.personality != -1:
+          self.personality = CS.personality
+        else:
+          self.personality = (self.personality - 1) % 3
         self.params.put_nonblocking('LongitudinalPersonality', self.personality)
         self.events.add(EventName.personalityChanged)
 
