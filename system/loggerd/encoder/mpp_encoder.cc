@@ -140,13 +140,36 @@ void MppEncoder::encoder_open(const char* path) {
       return;
     }
 
+    if (mpp_buffer_group_get_internal(&frame_buf_group, MPP_BUFFER_TYPE_DRM) != MPP_OK) {
+      LOGE("mpp_buffer_group_get_internal failed for %s", path);
+      encoder_close();
+      return;
+    }
+    for (size_t i = 0; i < frame_buffers.size(); ++i) {
+      if (mpp_buffer_get(frame_buf_group, &frame_buffers[i], alw * alh * 3 / 2) != MPP_OK) {
+        LOGE("mpp_buffer_get prealloc failed for %s idx %zu", path, i);
+        encoder_close();
+        return;
+      }
+    }
+    frame_buffer_idx = 0;
+
     is_open = true;
     segment_num++;
     counter = 0;
 }
 
 void MppEncoder::encoder_close() {
-    if (!is_open) return;
+    for (auto &buf : frame_buffers) {
+      if (buf != nullptr) {
+        mpp_buffer_put(buf);
+        buf = nullptr;
+      }
+    }
+    if (frame_buf_group != nullptr) {
+      mpp_buffer_group_put(frame_buf_group);
+      frame_buf_group = nullptr;
+    }
     if (cfg != nullptr) {
       mpp_enc_cfg_deinit(cfg);
       cfg = nullptr;
@@ -156,7 +179,17 @@ void MppEncoder::encoder_close() {
       mpp_ctx = nullptr;
       mpp_mpi = nullptr;
     }
+    if (mpp_buf != nullptr) {
+      mpp_buf = nullptr;
+    }
     is_open = false;
+}
+
+MppBuffer MppEncoder::acquire_frame_buffer() {
+    if (frame_buffers.empty()) return nullptr;
+    MppBuffer buf = frame_buffers[frame_buffer_idx];
+    frame_buffer_idx = (frame_buffer_idx + 1) % frame_buffers.size();
+    return buf;
 }
 
 int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
@@ -169,14 +202,14 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
       return -1;
     }
 
-    // Allocate & populate frame buffer
-    if (mpp_buffer_get(NULL, &mpp_buf, alw * alh * 3 / 2) != MPP_OK) {
-      LOGE("mpp_buffer_get failed");
+    // Reuse preallocated frame buffers to avoid per-frame allocator overhead.
+    mpp_buf = acquire_frame_buffer();
+    if (mpp_buf == nullptr) {
+      LOGE("no preallocated mpp frame buffer available");
       return -1;
     }
     if (mpp_frame_init(&frame) != MPP_OK) {
       LOGE("mpp_frame_init failed");
-      mpp_buffer_put(mpp_buf);
       mpp_buf = nullptr;
       return -1;
     }
@@ -190,7 +223,6 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
       if (downscale_buf == nullptr) {
         LOGE("downscale buffer is null");
         mpp_frame_deinit(&frame);
-        mpp_buffer_put(mpp_buf);
         mpp_buf = nullptr;
         return -1;
       }
@@ -199,7 +231,6 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
       if (imresize(src, dst, (double)out_width / buf->width, (double)out_height / buf->height, IM_SYNC) < 0) {
         LOGE("imresize failed");
         mpp_frame_deinit(&frame);
-        mpp_buffer_put(mpp_buf);
         mpp_buf = nullptr;
         return -1;
       }
@@ -212,13 +243,11 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
     mpp_frame_set_buffer(frame, mpp_buf);
     if (mpp_mpi->encode_put_frame(mpp_ctx, frame) != MPP_OK) {
       mpp_frame_deinit(&frame);
-      mpp_buffer_put(mpp_buf);
       mpp_buf = nullptr;
       return -1;
     }
     mpp_frame_deinit(&frame);
     if (mpp_mpi->encode_get_packet(mpp_ctx, &packet) != MPP_OK) {
-      mpp_buffer_put(mpp_buf);
       mpp_buf = nullptr;
       return -1;
     }
@@ -238,7 +267,6 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
     counter++;
     mpp_packet_deinit(&packet);
     packet = nullptr;
-    mpp_buffer_put(mpp_buf);
     mpp_buf = nullptr;
     return 1;
 }

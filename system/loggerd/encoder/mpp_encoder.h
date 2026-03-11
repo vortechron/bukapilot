@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <array>
 
 #include "system/loggerd/encoder/encoder.h"
 #include "system/loggerd/loggerd.h"
@@ -22,6 +23,7 @@ public:
   void encoder_close();
 private:
   void encoder_open(const char* path);
+  MppBuffer acquire_frame_buffer();
 
   int segment_num = -1;
   int counter = 0;
@@ -37,7 +39,11 @@ private:
   MppFrame frame = nullptr;
   MppPacket packet = nullptr;
   MppEncCfg cfg = nullptr;
+  MppBufferGroup frame_buf_group = nullptr;
   MppBuffer mpp_buf = nullptr;
+  static constexpr size_t FRAME_BUFFER_POOL_SIZE = 6;
+  std::array<MppBuffer, FRAME_BUFFER_POOL_SIZE> frame_buffers = {};
+  size_t frame_buffer_idx = 0;
 
   void *downscale_buf = nullptr;
 };
