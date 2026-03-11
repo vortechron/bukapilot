@@ -144,6 +144,11 @@ void MppEncoder::encoder_open(const char* path) {
       encoder_close();
       return;
     }
+    if (mpp_frame_init(&frame) != MPP_OK) {
+      LOGE("mpp_frame_init failed for %s", path);
+      encoder_close();
+      return;
+    }
 
     if (!use_zero_copy) {
       if (mpp_buffer_group_get_internal(&frame_buf_group, MPP_BUFFER_TYPE_DRM) != MPP_OK) {
@@ -187,6 +192,10 @@ void MppEncoder::encoder_close() {
     if (cfg != nullptr) {
       mpp_enc_cfg_deinit(cfg);
       cfg = nullptr;
+    }
+    if (frame != nullptr) {
+      mpp_frame_deinit(&frame);
+      frame = nullptr;
     }
     if (mpp_ctx != nullptr) {
       mpp_destroy(mpp_ctx);
@@ -258,11 +267,6 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
         return -1;
       }
     }
-    if (mpp_frame_init(&frame) != MPP_OK) {
-      LOGE("mpp_frame_init failed");
-      mpp_buf = nullptr;
-      return -1;
-    }
     mpp_frame_set_width(frame, buf->width);
     mpp_frame_set_height(frame, buf->height);
     mpp_frame_set_hor_stride(frame, alw);
@@ -272,7 +276,6 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
     if (is_downscale) {
       if (downscale_buf == nullptr) {
         LOGE("downscale buffer is null");
-        mpp_frame_deinit(&frame);
         mpp_buf = nullptr;
         return -1;
       }
@@ -280,7 +283,6 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
       dst = wrapbuffer_virtualaddr(downscale_buf, alw, alh, RK_FORMAT_YCbCr_420_SP);
       if (imresize(src, dst, (double)out_width / buf->width, (double)out_height / buf->height, IM_SYNC) < 0) {
         LOGE("imresize failed");
-        mpp_frame_deinit(&frame);
         mpp_buf = nullptr;
         return -1;
       }
@@ -292,11 +294,9 @@ int MppEncoder::encode_frame(VisionBuf* buf, VisionIpcBufExtra *extra) {
 
     mpp_frame_set_buffer(frame, mpp_buf);
     if (mpp_mpi->encode_put_frame(mpp_ctx, frame) != MPP_OK) {
-      mpp_frame_deinit(&frame);
       mpp_buf = nullptr;
       return -1;
     }
-    mpp_frame_deinit(&frame);
     if (mpp_mpi->encode_get_packet(mpp_ctx, &packet) != MPP_OK) {
       mpp_buf = nullptr;
       return -1;
