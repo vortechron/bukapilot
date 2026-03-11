@@ -1,3 +1,5 @@
+import hashlib
+import json
 import math
 import os
 import subprocess
@@ -8,13 +10,10 @@ from functools import cached_property, lru_cache
 from pathlib import Path
 
 from cereal import log
-from openpilot.common.util import sudo_read, sudo_write
 from openpilot.common.gpio import gpio_set, gpio_init, get_irqs_for_action
-from openpilot.system.hardware.base import HardwareBase, LPABase, ThermalConfig, ThermalZone
-from openpilot.system.hardware.tici import iwlist
-from openpilot.system.hardware.tici.esim import TiciLPA
-from openpilot.system.hardware.tici.pins import GPIO
-from openpilot.system.hardware.tici.amplifier import Amplifier
+from openpilot.system.hardware.base import HardwareBase, ThermalConfig, ThermalZone
+from openpilot.system.hardware.ka2 import iwlist
+from openpilot.system.hardware.ka2.pins import GPIO
 
 NM = 'org.freedesktop.NetworkManager'
 NM_CON_ACT = NM + '.Connection.Active'
@@ -62,6 +61,25 @@ MM_MODEM_ACCESS_TECHNOLOGY_UMTS = 1 << 5
 MM_MODEM_ACCESS_TECHNOLOGY_LTE = 1 << 14
 
 
+def sudo_write(val, path):
+  try:
+    with open(path, 'w') as f:
+      f.write(str(val))
+  except PermissionError:
+    os.system(f"sudo chmod a+w {path}")
+    try:
+      with open(path, 'w') as f:
+        f.write(str(val))
+    except PermissionError:
+      # fallback for debugfs files
+      os.system(f"sudo su -c 'echo {val} > {path}'")
+
+def sudo_read(path: str) -> str:
+  try:
+    return subprocess.check_output(f"sudo cat {path}", shell=True, encoding='utf8')
+  except Exception:
+    return ""
+
 def affine_irq(val, action):
   irqs = get_irqs_for_action(action)
   if len(irqs) == 0:
@@ -71,14 +89,7 @@ def affine_irq(val, action):
   for i in irqs:
     sudo_write(str(val), f"/proc/irq/{i}/smp_affinity_list")
 
-@lru_cache
-def get_device_type():
-  # lru_cache and cache can cause memory leaks when used in classes
-  with open("/sys/firmware/devicetree/base/model") as f:
-    model = f.read().strip('\x00')
-  return model.split('comma ')[-1]
-
-class Tici(HardwareBase):
+class Ka2(HardwareBase):
   @cached_property
   def bus(self):
     import dbus
@@ -92,18 +103,16 @@ class Tici(HardwareBase):
   def mm(self):
     return self.bus.get_object(MM, '/org/freedesktop/ModemManager1')
 
-  @cached_property
-  def amplifier(self):
-    if self.get_device_type() == "mici":
-      return None
-    return Amplifier()
-
   def get_os_version(self):
     with open("/VERSION") as f:
       return f.read().strip()
 
   def get_device_type(self):
-    return get_device_type()
+    return "ka2"
+
+  # ka2 sound card is always online
+  def get_sound_card_online(self):
+    return True
 
   def reboot(self, reason=None):
     subprocess.check_output(["sudo", "reboot"])
@@ -113,53 +122,49 @@ class Tici(HardwareBase):
     os.sync()
     self.reboot()
 
+  def get_current_power_draw(self):
+    # Same I2C power monitor (e.g. ina3221) at 0-0040 as in power_monitor.py; power1_input is microwatts
+    return HardwareBase.read_param_file(
+      "/sys/bus/i2c/devices/0-0040/hwmon/hwmon1/power1_input", int, 0
+    ) / 1e6
+
+  def get_som_power_draw(self):
+    # KA2 has no separate SoM power rail sensor (unlike TICI BMS); total draw is from get_current_power_draw
+    return 0
+
+  def get_nvme_temperatures(self):
+    return []
+
+  def get_screen_brightness(self):
+    return 0
+
+  def set_screen_brightness(self, percentage):
+    pass
+
   def get_serial(self):
-    return self.get_cmdline()['androidboot.serialno']
-
-  def get_voltage(self):
-    with open("/sys/class/hwmon/hwmon1/in1_input") as f:
-      return int(f.read())
-
-  def get_current(self):
-    with open("/sys/class/hwmon/hwmon1/curr1_input") as f:
-      return int(f.read())
-
-  def set_ir_power(self, percent: int):
-    if self.get_device_type() == "tizi":
-      return
-
-    value = int((percent / 100) * 300)
-    with open("/sys/class/leds/led:switch_2/brightness", "w") as f:
-      f.write("0\n")
-    with open("/sys/class/leds/led:torch_2/brightness", "w") as f:
-      f.write(f"{value}\n")
-    with open("/sys/class/leds/led:switch_2/brightness", "w") as f:
-      f.write(f"{value}\n")
+    return subprocess.check_output("grep 'Serial' /proc/cpuinfo | sed 's/.*: //'", shell=True, text=True).strip()
 
   def get_network_type(self):
     try:
       primary_connection = self.nm.Get(NM, 'PrimaryConnection', dbus_interface=DBUS_PROPS, timeout=TIMEOUT)
       primary_connection = self.bus.get_object(NM, primary_connection)
       primary_type = primary_connection.Get(NM_CON_ACT, 'Type', dbus_interface=DBUS_PROPS, timeout=TIMEOUT)
-
       if primary_type == '802-3-ethernet':
         return NetworkType.ethernet
       elif primary_type == '802-11-wireless':
         return NetworkType.wifi
+    except Exception:
+      pass
+
+    try:
+      modem = self.get_modem()
+      access_t = modem.Get(MM_MODEM, 'AccessTechnologies', dbus_interface=DBUS_PROPS, timeout=TIMEOUT)
+      if access_t >= MM_MODEM_ACCESS_TECHNOLOGY_LTE:
+        return NetworkType.cell4G
+      elif access_t >= MM_MODEM_ACCESS_TECHNOLOGY_UMTS:
+        return NetworkType.cell3G
       else:
-        active_connections = self.nm.Get(NM, 'ActiveConnections', dbus_interface=DBUS_PROPS, timeout=TIMEOUT)
-        for conn in active_connections:
-          c = self.bus.get_object(NM, conn)
-          tp = c.Get(NM_CON_ACT, 'Type', dbus_interface=DBUS_PROPS, timeout=TIMEOUT)
-          if tp == 'gsm':
-            modem = self.get_modem()
-            access_t = modem.Get(MM_MODEM, 'AccessTechnologies', dbus_interface=DBUS_PROPS, timeout=TIMEOUT)
-            if access_t >= MM_MODEM_ACCESS_TECHNOLOGY_LTE:
-              return NetworkType.cell4G
-            elif access_t >= MM_MODEM_ACCESS_TECHNOLOGY_UMTS:
-              return NetworkType.cell3G
-            else:
-              return NetworkType.cell2G
+        return NetworkType.cell2G
     except Exception:
       pass
 
@@ -200,18 +205,14 @@ class Tici(HardwareBase):
         'data_connected': modem.Get(MM_MODEM, 'State', dbus_interface=DBUS_PROPS, timeout=TIMEOUT) == MM_MODEM_STATE.CONNECTED,
       }
 
-  def get_sim_lpa(self) -> LPABase:
-    return TiciLPA()
-
   def get_imei(self, slot):
-    if slot != 0:
-      return ""
+    # generate fake 15 digit imei from wlan0 mac address
+    mac = subprocess.getoutput("cat /sys/class/net/wlan0/address")
+    clean_mac = mac.replace(':', '').replace('-', '')
 
-    return str(self.get_modem().Get(MM_MODEM, 'EquipmentIdentifier', dbus_interface=DBUS_PROPS, timeout=TIMEOUT))
+    return hashlib.sha256(clean_mac.encode()).hexdigest()[:15]
 
   def get_network_info(self):
-    if self.get_device_type() == "mici":
-      return None
     try:
       modem = self.get_modem()
       info = modem.Command("AT+QNWINFO", math.ceil(TIMEOUT), dbus_interface=MM_MODEM, timeout=TIMEOUT)
@@ -301,120 +302,104 @@ class Tici(HardwareBase):
     except Exception:
       return None
 
+  def get_modem_nv(self):
+    timeout = 0.2  # Default timeout is too short
+    files = (
+      '/nv/item_files/modem/mmode/ue_usage_setting',
+      '/nv/item_files/ims/IMS_enable',
+      '/nv/item_files/modem/mmode/sms_only',
+    )
+    try:
+      modem = self.get_modem()
+      return { fn: str(modem.Command(f'AT+QNVFR="{fn}"', math.ceil(timeout), dbus_interface=MM_MODEM, timeout=timeout)) for fn in files}
+    except Exception:
+      return None
+
   def get_modem_temperatures(self):
     timeout = 0.2  # Default timeout is too short
     try:
       modem = self.get_modem()
       temps = modem.Command("AT+QTEMP", math.ceil(timeout), dbus_interface=MM_MODEM, timeout=timeout)
-      return list(filter(lambda t: t != 255, map(int, temps.split(' ')[1].split(','))))
+      return list(map(int, temps.split(' ')[1].split(',')))
     except Exception:
       return []
-
-
-  def get_current_power_draw(self):
-    return (self.read_param_file("/sys/class/hwmon/hwmon1/power1_input", int) / 1e6)
-
-  def get_som_power_draw(self):
-    return (self.read_param_file("/sys/class/power_supply/bms/voltage_now", int) * self.read_param_file("/sys/class/power_supply/bms/current_now", int) / 1e12)
 
   def shutdown(self):
     os.system("sudo poweroff")
 
   def get_thermal_config(self):
-    intake, exhaust, case = None, None, None
-    if self.get_device_type() == "mici":
-      case = ThermalZone("case")
-      intake = ThermalZone("intake")
-      exhaust = ThermalZone("exhaust")
-    return ThermalConfig(cpu=[ThermalZone(f"cpu{i}-silver-usr") for i in range(4)] +
-                             [ThermalZone(f"cpu{i}-gold-usr") for i in range(4)],
-                         gpu=[ThermalZone("gpu0-usr"), ThermalZone("gpu1-usr")],
-                         dsp=ThermalZone("compute-hvx-usr"),
-                         memory=ThermalZone("ddr-usr"),
-                         pmic=[ThermalZone("pm8998_tz"), ThermalZone("pm8005_tz")],
-                         intake=intake,
-                         exhaust=exhaust,
-                         case=case)
-
-  def set_display_power(self, on):
-    try:
-      with open("/sys/class/backlight/panel0-backlight/bl_power", "w") as f:
-        f.write("0" if on else "4")
-    except Exception:
-      pass
-
-  def set_screen_brightness(self, percentage):
-    try:
-      with open("/sys/class/backlight/panel0-backlight/max_brightness") as f:
-        max_brightness = float(f.read().strip())
-
-      val = int(percentage * (max_brightness / 100.))
-      with open("/sys/class/backlight/panel0-backlight/brightness", "w") as f:
-        f.write(str(val))
-    except Exception:
-      pass
-
-  def get_screen_brightness(self):
-    try:
-      with open("/sys/class/backlight/panel0-backlight/max_brightness") as f:
-        max_brightness = float(f.read().strip())
-
-      with open("/sys/class/backlight/panel0-backlight/brightness") as f:
-        return int(float(f.read()) / (max_brightness / 100.))
-    except Exception:
-      return 0
+    return ThermalConfig(
+      cpu=[ThermalZone("bigcore0-thermal", 1000), ThermalZone("bigcore1-thermal", 1000)],
+      gpu=[ThermalZone("gpu-thermal", 1000), ThermalZone("npu-thermal", 1000)],
+      memory=ThermalZone("center-thermal", 1000),
+      pmic=[ThermalZone("soc-thermal", 1000), ThermalZone("center-thermal", 1000)],
+    )
 
   def set_power_save(self, powersave_enabled):
-    # amplifier, 100mW at idle
-    if self.amplifier is not None:
-      self.amplifier.set_global_shutdown(amp_disabled=powersave_enabled)
-      if not powersave_enabled:
-        self.amplifier.initialize_configuration()
-
     # *** CPU config ***
 
-    # offline big cluster
-    for i in range(4, 8):
+    # offline big cluster, leave core 4 online for boardd
+    for i in range(5, 8):
       val = '0' if powersave_enabled else '1'
       sudo_write(val, f'/sys/devices/system/cpu/cpu{i}/online')
 
     for n in ('0', '4'):
-      if powersave_enabled and n == '4':
-        continue
       gov = 'ondemand' if powersave_enabled else 'performance'
       sudo_write(gov, f'/sys/devices/system/cpu/cpufreq/policy{n}/scaling_governor')
 
-    # *** IRQ config ***
+    # *** GPU (Mali): 300 MHz + simple_ondemand in power save, else 1000 MHz + performance ***
+    _gpu_devfreq = "/sys/class/devfreq/fb000000.gpu"
+    if os.path.isfile(f"{_gpu_devfreq}/governor"):
+      if powersave_enabled:
+        sudo_write("300000000", f"{_gpu_devfreq}/max_freq")
+        sudo_write("simple_ondemand", f"{_gpu_devfreq}/governor")
+      else:
+        sudo_write("1000000000", f"{_gpu_devfreq}/max_freq")
+        sudo_write("performance", f"{_gpu_devfreq}/governor")
 
-    # GPU, modeld core
-    affine_irq(7, "kgsl-3d0")
+    # *** IRQ config ***
+    pass
+
+    # boardd core
+    #affine_irq(4, "spi_geni")         # SPI
+    #affine_irq(4, "xhci-hcd:usb3")    # aux panda USB (or potentially anything else on USB)
+    #if "tici" in self.get_device_type():
+    #  affine_irq(4, "xhci-hcd:usb1")  # internal panda USB (also modem)
+
+    # GPU
+    #affine_irq(5, "kgsl-3d0")
 
     # camerad core
-    camera_irqs = ("a5", "cci", "cpas_camnoc", "cpas-cdm", "csid", "ife", "csid-lite", "ife-lite")
-    for n in camera_irqs:
-      affine_irq(6, n)
+    #camera_irqs = ("cci", "cpas_camnoc", "cpas-cdm", "csid", "ife", "csid-lite", "ife-lite")
+    #for n in camera_irqs:
+    #  affine_irq(5, n)
+
 
   def get_gpu_usage_percent(self):
+    # Mali devfreq exposes load as "percent@freqHz" (e.g. "0@300000000Hz")
     try:
-      with open('/sys/class/kgsl/kgsl-3d0/gpubusy') as f:
-        used, total = f.read().strip().split()
-      return 100.0 * int(used) / int(total)
+      with open("/sys/class/devfreq/fb000000.gpu/load", "r") as f:
+        s = f.read().strip()
+      if "@" in s:
+        return int(float(s.split("@")[0]))
+      return int(float(s))
     except Exception:
       return 0
 
-  def get_gpu_usage_percent(self):
-    return []
+  def get_npu_usage_percent(self):
+    try:
+      npu_load = sudo_read("/sys/kernel/debug/rknpu/load")
+      return [int(x.split('%')[0]) for x in npu_load.split() if '%' in x]
+    except Exception:
+      return [0, 0, 0]
 
   def initialize_hardware(self):
-    if self.amplifier is not None:
-      self.amplifier.initialize_configuration()
-
-    # Allow hardwared to write engagement status to kmsg
+    # Allow thermald to write engagement status to kmsg
     os.system("sudo chmod a+w /dev/kmsg")
 
     # Ensure fan gpio is enabled so fan runs until shutdown, also turned on at boot by the ABL
-    gpio_init(GPIO.SOM_ST_IO, True)
-    gpio_set(GPIO.SOM_ST_IO, 1)
+    # TODO gpio_init(GPIO.SOM_ST_IO, True)
+    # TODO gpio_set(GPIO.SOM_ST_IO, 1)
 
     # *** IRQ config ***
 
@@ -422,42 +407,22 @@ class Tici(HardwareBase):
     sudo_write("f", "/proc/irq/default_smp_affinity")
 
     # move these off the default core
-    affine_irq(1, "msm_vidc")  # encoders
-    affine_irq(1, "i2c_geni")  # sensors
+    #affine_irq(1, "msm_drm")   # display
+    #affine_irq(1, "msm_vidc")  # encoders
+    #affine_irq(1, "i2c_geni")  # sensors
 
-    # *** GPU config ***
-    # https://github.com/commaai/agnos-kernel-sdm845/blob/master/arch/arm64/boot/dts/qcom/sdm845-gpu.dtsi#L216
-    affine_irq(5, "fts_ts")    # touch
-    affine_irq(5, "msm_drm")   # display
-    sudo_write("1", "/sys/class/kgsl/kgsl-3d0/min_pwrlevel")
-    sudo_write("1", "/sys/class/kgsl/kgsl-3d0/max_pwrlevel")
-    sudo_write("1", "/sys/class/kgsl/kgsl-3d0/force_bus_on")
-    sudo_write("1", "/sys/class/kgsl/kgsl-3d0/force_clk_on")
-    sudo_write("1", "/sys/class/kgsl/kgsl-3d0/force_rail_on")
-    sudo_write("1000", "/sys/class/kgsl/kgsl-3d0/idle_timer")
-    sudo_write("performance", "/sys/class/kgsl/kgsl-3d0/devfreq/governor")
-    sudo_write("710", "/sys/class/kgsl/kgsl-3d0/max_clock_mhz")
+    # setup cpu, ddr and npu governors
+    # TODO see if cpu and ddr needed
+    sudo_write("userspace", "/sys/class/devfreq/fdab0000.npu/governor")
+    sudo_write("1000000000", "/sys/class/devfreq/fdab0000.npu/userspace/set_freq")
 
-    # setup governors
-    sudo_write("performance", "/sys/class/devfreq/soc:qcom,cpubw/governor")
-    sudo_write("performance", "/sys/class/devfreq/soc:qcom,memlat-cpu0/governor")
-    sudo_write("performance", "/sys/class/devfreq/soc:qcom,memlat-cpu4/governor")
-
-    # *** VIDC (encoder) config ***
-    sudo_write("N", "/sys/kernel/debug/msm_vidc/clock_scaling")
-    sudo_write("Y", "/sys/kernel/debug/msm_vidc/disable_thermal_mitigation")
-
-    # pandad core
-    affine_irq(3, "spi_geni")         # SPI
-    try:
-      pid = subprocess.check_output(["pgrep", "-f", "spi0"], encoding='utf8').strip()
-      subprocess.call(["sudo", "chrt", "-f", "-p", "1", pid])
-      subprocess.call(["sudo", "taskset", "-pc", "3", pid])
-    except subprocess.CalledProcessException as e:
-      print(str(e))
+    sudo_write("userspace", "/sys/class/devfreq/dmc/governor")
+    sudo_write("2112000000", "/sys/class/devfreq/dmc/userspace/set_freq")
 
   def configure_modem(self):
-    sim_id = self.get_sim_info().get('sim_id', '')
+    sim_info = self.get_sim_info()
+    sim_id = sim_info.get('sim_id') or ''
+    mcc_mnc = sim_info.get('mcc_mnc') or ''
 
     modem = self.get_modem()
     try:
@@ -465,43 +430,16 @@ class Tici(HardwareBase):
     except Exception:
       manufacturer = None
 
-    cmds = []
+    wwan0_setup = "/usr/kommu/lte/wwan0-setup.sh"
+    if os.path.isfile(wwan0_setup):
+      os.system(f"bash {wwan0_setup} {mcc_mnc}")
 
-    if self.get_device_type() in ("tizi", ):
-      # clear out old blue prime initial APN
-      os.system('mmcli -m any --3gpp-set-initial-eps-bearer-settings="apn="')
-
-      cmds += [
-        # SIM hot swap
-        'AT+QSIMDET=1,0',
-        'AT+QSIMSTAT=1',
-
-        # configure modem as data-centric
-        'AT+QNVW=5280,0,"0102000000000000"',
-        'AT+QNVFW="/nv/item_files/ims/IMS_enable",00',
-        'AT+QNVFW="/nv/item_files/modem/mmode/ue_usage_setting",01',
-      ]
-    elif manufacturer == 'Cavli Inc.':
-      cmds += [
-        'AT^SIMSWAP=1',     # use SIM slot, instead of internal eSIM
-        'AT$QCSIMSLEEP=0',  # disable SIM sleep
-        'AT$QCSIMCFG=SimPowerSave,0',  # more sleep disable
-
-        # ethernet config
-        'AT$QCPCFG=usbNet,0',
-        'AT$QCNETDEVCTL=3,1',
-      ]
-    else:
-      # this modem gets upset with too many AT commands
-      if sim_id is None or len(sim_id) == 0:
-        cmds += [
-          # SIM sleep disable
-          'AT$QCSIMSLEEP=0',
-          'AT$QCSIMCFG=SimPowerSave,0',
-
-          # ethernet config
-          'AT$QCPCFG=usbNet,1',
-        ]
+    cmds = [
+      # configure modem as data-centric
+      'AT+QNVW=5280,0,"0102000000000000"',
+      'AT+QNVFW="/nv/item_files/ims/IMS_enable",00',
+      'AT+QNVFW="/nv/item_files/modem/mmode/ue_usage_setting",01',
+    ]
 
     for cmd in cmds:
       try:
@@ -509,26 +447,11 @@ class Tici(HardwareBase):
       except Exception:
         pass
 
-    # eSIM prime
-    dest = "/etc/NetworkManager/system-connections/esim.nmconnection"
-    if self.get_sim_lpa().is_comma_profile(sim_id) and not os.path.exists(dest):
-      with open(Path(__file__).parent/'esim.nmconnection') as f, tempfile.NamedTemporaryFile(mode='w') as tf:
-        dat = f.read()
-        dat = dat.replace("sim-id=", f"sim-id={sim_id}")
-        tf.write(dat)
-        tf.flush()
-
-        # needs to be root
-        os.system(f"sudo cp {tf.name} {dest}")
-      os.system(f"sudo nmcli con load {dest}")
-
-  def reboot_modem(self):
-    modem = self.get_modem()
-    for state in (0, 1):
-      try:
-        modem.Command(f'AT+CFUN={state}', math.ceil(TIMEOUT), dbus_interface=MM_MODEM, timeout=TIMEOUT)
-      except Exception:
-        pass
+    try:
+      # fallback: directly remove default route if modem connects with one
+      os.system("sudo ip route del default dev wwan0 2>/dev/null || true")
+    except Exception:
+      pass
 
   def get_networks(self):
     r = {}
@@ -577,35 +500,30 @@ class Tici(HardwareBase):
     return True
 
   def reset_internal_panda(self):
-    gpio_init(GPIO.STM_RST_N, True)
-    gpio_init(GPIO.STM_BOOT0, True)
+    #gpio_init(GPIO.STM_RST_N, True)
 
-    gpio_set(GPIO.STM_RST_N, 1)
-    gpio_set(GPIO.STM_BOOT0, 0)
-    time.sleep(1)
-    gpio_set(GPIO.STM_RST_N, 0)
+    #gpio_set(GPIO.STM_RST_N, 1)
+    #time.sleep(1)
+    #gpio_set(GPIO.STM_RST_N, 0)
+    pass
 
   def recover_internal_panda(self):
-    gpio_init(GPIO.STM_RST_N, True)
-    gpio_init(GPIO.STM_BOOT0, True)
+    #gpio_init(GPIO.STM_RST_N, True)
+    #gpio_init(GPIO.STM_BOOT0, True)
 
-    gpio_set(GPIO.STM_RST_N, 1)
-    gpio_set(GPIO.STM_BOOT0, 1)
-    time.sleep(0.5)
-    gpio_set(GPIO.STM_RST_N, 0)
-    time.sleep(0.5)
-    gpio_set(GPIO.STM_BOOT0, 0)
+    #gpio_set(GPIO.STM_RST_N, 1)
+    #gpio_set(GPIO.STM_BOOT0, 1)
+    #time.sleep(0.5)
+    #gpio_set(GPIO.STM_RST_N, 0)
+    #time.sleep(0.5)
+    #gpio_set(GPIO.STM_BOOT0, 0)
+    pass
 
   def booted(self):
-    # this normally boots within 8s, but on rare occasions takes 30+s
-    encoder_state = sudo_read("/sys/kernel/debug/msm_vidc/core0/info")
-    if "Core state: 0" in encoder_state and (time.monotonic() < 60*2):
-      return False
     return True
 
 if __name__ == "__main__":
-  t = Tici()
+  t = Ka2()
   t.configure_modem()
   t.initialize_hardware()
   t.set_power_save(False)
-  print(t.get_sim_info())
