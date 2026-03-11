@@ -18,7 +18,10 @@
 
 ExitHandler do_exit;
 constexpr int ENCODER_VIPC_STALL_TIMEOUT_MS = 300;
+constexpr int ENCODER_OUTPUT_STALL_TIMEOUT_MS = 1000;
 constexpr int ENCODER_REOPEN_FAILURE_THRESHOLD = 10;
+constexpr int ENCODER_RECONNECT_BACKOFF_MS = 50;
+constexpr int ENCODER_HEALTH_LOG_PERIOD_MS = 5000;
 
 std::vector<int> parse_affinity_cores(const char *env_val) {
   std::vector<int> cores;
@@ -67,6 +70,17 @@ bool sync_encoders(EncoderdState *s, VisionStreamType cam_type, uint32_t frame_i
   }
 }
 
+void reset_sync_for_camera(EncoderdState *s, VisionStreamType cam_type) {
+  if (s->camera_ready[cam_type]) {
+    int prev = s->encoders_ready.fetch_sub(1);
+    if (prev <= 0) {
+      s->encoders_ready = 0;
+    }
+  }
+  s->camera_ready[cam_type] = false;
+  s->camera_synced[cam_type] = false;
+}
+
 
 void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
   util::set_thread_name(cam_info.thread_name);
@@ -78,11 +92,34 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
   std::unique_ptr<JpegEncoder> jpeg_encoder;
 
   int cur_seg = 0;
+
+  auto close_and_reset_encoders = [&]() {
+    for (auto &e : encoders) {
+      e->encoder_close();
+    }
+    encoders.clear();
+    encode_failure_counts.clear();
+    jpeg_encoder.reset();
+    cur_seg = 0;
+    reset_sync_for_camera(s, cam_info.stream_type);
+  };
+
+  auto reopen_all_encoders = [&]() {
+    for (size_t i = 0; i < encoders.size(); ++i) {
+      encoders[i]->encoder_close();
+      encoders[i]->encoder_open();
+      encode_failure_counts[i] = 0;
+    }
+  };
+
   while (!do_exit) {
     if (!vipc_client.connect(false)) {
       util::sleep_for(5);
       continue;
     }
+
+    // Always start with a clean encoder state after (re)connect.
+    close_and_reset_encoders();
 
     // init encoders
     if (encoders.empty()) {
@@ -108,6 +145,11 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
 
     bool lagging = false;
     double last_frame_seen_tms = millis_since_boot();
+    double last_encode_success_tms = last_frame_seen_tms;
+    double last_health_log_tms = last_frame_seen_tms;
+    uint32_t last_encoded_frame_id = 0;
+    uint64_t encoded_frames = 0;
+    uint64_t recoveries = 0;
     while (!do_exit) {
       VisionIpcBufExtra extra;
       VisionBuf* buf = vipc_client.recv(&extra);
@@ -151,27 +193,54 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
       }
 
       // encode a frame
-      for (int i = 0; i < encoders.size(); ++i) {
+      bool frame_encoded = false;
+      for (size_t i = 0; i < encoders.size(); ++i) {
         int out_id = encoders[i]->encode_frame(buf, &extra);
 
         if (out_id == -1) {
           encode_failure_counts[i]++;
           LOGE("Failed to encode frame. frame_id: %d", extra.frame_id);
           if (encode_failure_counts[i] >= ENCODER_REOPEN_FAILURE_THRESHOLD) {
-            LOGE("encoder %s stream %d exceeded failure threshold (%d), reopening",
+            LOGE("encoder %s stream %zu exceeded failure threshold (%d), reopening",
                  cam_info.thread_name, i, ENCODER_REOPEN_FAILURE_THRESHOLD);
             encoders[i]->encoder_close();
             encoders[i]->encoder_open();
             encode_failure_counts[i] = 0;
+            recoveries++;
           }
         } else {
           encode_failure_counts[i] = 0;
+          frame_encoded = true;
         }
+      }
+
+      const double now_tms = millis_since_boot();
+      if (frame_encoded) {
+        last_encode_success_tms = now_tms;
+        last_encoded_frame_id = extra.frame_id;
+        encoded_frames++;
+      } else if ((now_tms - last_encode_success_tms) > ENCODER_OUTPUT_STALL_TIMEOUT_MS) {
+        LOGE("encoder %s output stalled for %.1f ms, reopening all streams",
+             cam_info.thread_name, (now_tms - last_encode_success_tms));
+        reopen_all_encoders();
+        last_encode_success_tms = now_tms;
+        recoveries++;
+      }
+
+      if ((now_tms - last_health_log_tms) > ENCODER_HEALTH_LOG_PERIOD_MS) {
+        LOGD("encoder %s health: encoded=%" PRIu64 " last_frame=%u recoveries=%" PRIu64,
+             cam_info.thread_name, encoded_frames, last_encoded_frame_id, recoveries);
+        last_health_log_tms = now_tms;
       }
 
       if (jpeg_encoder && (extra.frame_id % 1200 == 100)) {
         jpeg_encoder->pushThumbnail(buf, extra);
       }
+    }
+
+    close_and_reset_encoders();
+    if (!do_exit) {
+      util::sleep_for(ENCODER_RECONNECT_BACKOFF_MS);
     }
   }
 }
