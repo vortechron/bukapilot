@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 #include <array>
+#include <deque>
 #include <unordered_map>
 
 #include "system/loggerd/encoder/encoder.h"
@@ -25,6 +26,7 @@ public:
 private:
   void encoder_open(const char* path);
   MppBuffer acquire_frame_buffer();
+  int drain_packets(bool non_block);
 
   int segment_num = -1;
   int counter = 0;
@@ -47,6 +49,9 @@ private:
   std::array<MppBuffer, FRAME_BUFFER_POOL_SIZE> frame_buffers = {};
   size_t frame_buffer_idx = 0;
   std::unordered_map<int, MppBuffer> imported_buffers;
+  std::deque<VisionIpcBufExtra> pending_extras;
+  bool import_fallback_logged = false;
+  bool output_timeout_non_block = false;
 
-  void *downscale_buf = nullptr;
+  size_t frame_buf_size = 0;
 };

@@ -22,6 +22,8 @@ constexpr int ENCODER_OUTPUT_STALL_TIMEOUT_MS = 1000;
 constexpr int ENCODER_REOPEN_FAILURE_THRESHOLD = 10;
 constexpr int ENCODER_RECONNECT_BACKOFF_MS = 50;
 constexpr int ENCODER_HEALTH_LOG_PERIOD_MS = 5000;
+constexpr int ENCODER_FAILURE_LOG_PERIOD_MS = 1000;
+constexpr int ENCODER_FAILURE_LOG_BATCH_SIZE = 30;
 
 std::vector<int> parse_affinity_cores(const char *env_val) {
   std::vector<int> cores;
@@ -37,6 +39,19 @@ std::vector<int> parse_affinity_cores(const char *env_val) {
     }
   }
   return cores;
+}
+
+const char *stream_affinity_env(VisionStreamType stream_type) {
+  switch (stream_type) {
+    case VISION_STREAM_ROAD:
+      return "ENCODERD_ROAD_AFFINITY";
+    case VISION_STREAM_WIDE_ROAD:
+      return "ENCODERD_WIDE_AFFINITY";
+    case VISION_STREAM_DRIVER:
+      return "ENCODERD_DRIVER_AFFINITY";
+    default:
+      return "ENCODERD_STREAM_AFFINITY";
+  }
 }
 
 struct EncoderdState {
@@ -84,9 +99,20 @@ void reset_sync_for_camera(EncoderdState *s, VisionStreamType cam_type) {
 
 void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
   util::set_thread_name(cam_info.thread_name);
+  if (!Hardware::PC()) {
+    std::vector<int> stream_affinity = parse_affinity_cores(getenv(stream_affinity_env(cam_info.stream_type)));
+    if (!stream_affinity.empty()) {
+      int ret = util::set_core_affinity(stream_affinity);
+      if (ret != 0) {
+        LOGW("failed to set affinity for stream %s", cam_info.thread_name);
+      }
+    }
+  }
 
   std::vector<std::unique_ptr<Encoder>> encoders;
   std::vector<int> encode_failure_counts;
+  std::vector<int> encode_failure_burst_counts;
+  std::vector<double> encode_failure_last_log_tms;
   VisionIpcClient vipc_client = VisionIpcClient("camerad", cam_info.stream_type, false);
 
   std::unique_ptr<JpegEncoder> jpeg_encoder;
@@ -99,6 +125,8 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
     }
     encoders.clear();
     encode_failure_counts.clear();
+    encode_failure_burst_counts.clear();
+    encode_failure_last_log_tms.clear();
     jpeg_encoder.reset();
     cur_seg = 0;
     reset_sync_for_camera(s, cam_info.stream_type);
@@ -135,6 +163,8 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
         auto &e = encoders.emplace_back(new Encoder(encoder_info, buf_info.width, buf_info.height));
         e->encoder_open();
         encode_failure_counts.emplace_back(0);
+        encode_failure_burst_counts.emplace_back(0);
+        encode_failure_last_log_tms.emplace_back(0.0);
       }
 
       // Only one thumbnail can be generated per camera stream
@@ -199,17 +229,27 @@ void encoder_thread(EncoderdState *s, const LogCameraInfo &cam_info) {
 
         if (out_id == -1) {
           encode_failure_counts[i]++;
-          LOGE("Failed to encode frame. frame_id: %d", extra.frame_id);
+          encode_failure_burst_counts[i]++;
+          const double now_tms = millis_since_boot();
+          if ((now_tms - encode_failure_last_log_tms[i]) >= ENCODER_FAILURE_LOG_PERIOD_MS ||
+              encode_failure_burst_counts[i] >= ENCODER_FAILURE_LOG_BATCH_SIZE) {
+            LOGE("encoder %s stream %zu failures=%d consecutive=%d last_frame=%d",
+                 cam_info.thread_name, i, encode_failure_burst_counts[i], encode_failure_counts[i], extra.frame_id);
+            encode_failure_last_log_tms[i] = now_tms;
+            encode_failure_burst_counts[i] = 0;
+          }
           if (encode_failure_counts[i] >= ENCODER_REOPEN_FAILURE_THRESHOLD) {
             LOGE("encoder %s stream %zu exceeded failure threshold (%d), reopening",
                  cam_info.thread_name, i, ENCODER_REOPEN_FAILURE_THRESHOLD);
             encoders[i]->encoder_close();
             encoders[i]->encoder_open();
             encode_failure_counts[i] = 0;
+            encode_failure_burst_counts[i] = 0;
             recoveries++;
           }
         } else {
           encode_failure_counts[i] = 0;
+          encode_failure_burst_counts[i] = 0;
           frame_encoded = true;
         }
       }
