@@ -49,7 +49,6 @@ inline static std::unordered_map<std::string, ParamKeyAttributes> keys = {
     {"ExperimentalModeConfirmed", {PERSISTENT, BOOL}},
     {"FeaturesPackage", {PERSISTENT, STRING}},
     {"FirmwareQueryDone", {CLEAR_ON_MANAGER_START | CLEAR_ON_ONROAD_TRANSITION, BOOL}},
-    {"FixFingerprint", {PERSISTENT, STRING}},
     {"FormatSDCard", {CLEAR_ON_MANAGER_START, BOOL}},
     {"ForcePowerDown", {PERSISTENT, BOOL}},
     {"GitBranch", {PERSISTENT, STRING}},
