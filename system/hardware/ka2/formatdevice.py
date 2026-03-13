@@ -39,7 +39,7 @@ def main():
       if not ignition:
         cloudlog.info("Formatting")
         format_device()
-        p.put("FormatSDCard", b'0')
+        p.put_bool_nonblocking("FormatSDCard", False)
         break
 
 if __name__ == "__main__":
