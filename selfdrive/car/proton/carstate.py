@@ -56,6 +56,19 @@ class CarState(CarStateBase):
     self.blinker_on_alc_speed = False
     self.blinker_start_time = 0
 
+  T_FOLLOW_MAP = {0: 0.9, 1: 1.20, 2: 1.40}
+  PERSONALITY_NAMES = {0: "aggressive", 1: "standard", 2: "relaxed"}
+
+  def _log_distance_change(self, distance_val, personality):
+    import os
+    log_path = "/tmp/distance_toggle.log"
+    if os.path.exists(log_path) and os.path.getsize(log_path) > 5_000_000:
+      os.remove(log_path)
+    t_follow = self.T_FOLLOW_MAP.get(personality, "unknown")
+    name = self.PERSONALITY_NAMES.get(personality, "unknown")
+    with open(log_path, "a") as f:
+      f.write(f"[{monotonic():.1f}] distance_bar={distance_val} personality={name}({personality}) T_FOLLOW={t_follow}s\n")
+
   def set_cur_blinker(self, alc_below_min_speed, rightBlinker):
     """Reset time and set cur_blinker"""
     self.blinker_start_time = monotonic()
@@ -152,7 +165,11 @@ class CarState(CarStateBase):
 
     self.res_btn_pressed = bool(cp.vl["ACC_BUTTONS"]["RES_BUTTON"])
     distance_val = int(cp_cam.vl["PCM_BUTTONS"]['SET_DISTANCE'])
-    self.set_long_personality(distance_val - 1)
+    new_personality = distance_val - 1
+    if not hasattr(self, '_prev_distance_val') or self._prev_distance_val != distance_val:
+      self._log_distance_change(distance_val, new_personality)
+      self._prev_distance_val = distance_val
+    self.set_long_personality(new_personality)
 
     self.cruise_speed = int(cp_cam.vl["PCM_BUTTONS"]['ACC_SET_SPEED']) * CV.KPH_TO_MS
     ret.cruiseState.speedCluster = self.cruise_speed
