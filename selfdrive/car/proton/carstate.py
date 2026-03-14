@@ -60,14 +60,17 @@ class CarState(CarStateBase):
   PERSONALITY_NAMES = {0: "aggressive", 1: "standard", 2: "relaxed"}
 
   def _log_distance_change(self, distance_val, personality):
-    import os
-    log_path = "/tmp/distance_toggle.log"
-    if os.path.exists(log_path) and os.path.getsize(log_path) > 5_000_000:
-      os.remove(log_path)
-    t_follow = self.T_FOLLOW_MAP.get(personality, "unknown")
-    name = self.PERSONALITY_NAMES.get(personality, "unknown")
-    with open(log_path, "a") as f:
-      f.write(f"[{monotonic():.1f}] distance_bar={distance_val} personality={name}({personality}) T_FOLLOW={t_follow}s\n")
+    try:
+      import os
+      log_path = "/tmp/distance_toggle.log"
+      if os.path.exists(log_path) and os.path.getsize(log_path) > 5_000_000:
+        os.remove(log_path)
+      t_follow = self.T_FOLLOW_MAP.get(personality, "unknown")
+      name = self.PERSONALITY_NAMES.get(personality, "unknown")
+      with open(log_path, "a") as f:
+        f.write(f"[{monotonic():.1f}] distance_bar={distance_val} personality={name}({personality}) T_FOLLOW={t_follow}s\n")
+    except Exception:
+      pass
 
   def set_cur_blinker(self, alc_below_min_speed, rightBlinker):
     """Reset time and set cur_blinker"""
