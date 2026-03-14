@@ -63,6 +63,23 @@ class CarController(CarControllerBase):
 
     self.cancel_press_cnt = 0
     self.last_cancel_press = 0
+    self._last_stop_log_t = 0.0
+
+  def _log_stop(self, v_ego, op_cmd, stock_cmd):
+    try:
+      t = monotonic()
+      if t - self._last_stop_log_t < 0.5:
+        return
+      self._last_stop_log_t = t
+      import os
+      log_path = "/tmp/stop_debug.log"
+      if os.path.exists(log_path) and os.path.getsize(log_path) > 5_000_000:
+        os.remove(log_path)
+      final = min(stock_cmd, op_cmd)
+      with open(log_path, "a") as f:
+        f.write(f"[{t:.1f}] v={v_ego:.2f} op_cmd={op_cmd:.1f} stock={stock_cmd:.1f} final={final:.1f}\n")
+    except Exception:
+      pass
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -138,8 +155,14 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
+        # When stopping (negative accel at low speed), trust openpilot fully —
+        # stock ACC blending dilutes braking and prevents full stop
+        stopping = CS.out.vEgo < 2.5 and accel_cmd < 0
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
-        if CS.out.vEgo < 2.5:
+        if stopping:
+          self._log_stop(CS.out.vEgo, accel_cmd, CS.stock_acc_cmd * mult)
+          accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
+        elif CS.out.vEgo < 2.5:
           accel_cmd = (CS.stock_acc_cmd * mult + accel_cmd)/2
         else:
           accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
