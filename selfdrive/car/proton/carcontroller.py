@@ -155,17 +155,13 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # When stopping (negative accel at low speed), trust openpilot fully —
-        # stock ACC blending dilutes braking and prevents full stop
-        stopping = CS.out.vEgo < 2.5 and accel_cmd < 0
+        # Use min(stock, openpilot) at all speeds — stock ACC acts as safety ceiling.
+        # Previously used 50/50 blend at v < 2.5 which caused creep toward stopped cars.
+        # SNG resume is handled by RISING_ENGAGE CAN flag, not accel_cmd value.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
-        if stopping:
+        if CS.out.vEgo < 2.5:
           self._log_stop(CS.out.vEgo, accel_cmd, CS.stock_acc_cmd * mult)
-          accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
-        elif CS.out.vEgo < 2.5:
-          accel_cmd = (CS.stock_acc_cmd * mult + accel_cmd)/2
-        else:
-          accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
+        accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
 
         can_sends.append(create_acc_cmd(self.packer, accel_cmd, CC.longActive, CS.out.gasPressed,
                                         standstill_request, self.resume, CS.out.brakePressed))

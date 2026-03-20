@@ -56,7 +56,7 @@ class CarState(CarStateBase):
     self.blinker_on_alc_speed = False
     self.blinker_start_time = 0
 
-  T_FOLLOW_MAP = {0: 0.9, 1: 1.20, 2: 1.40}
+  T_FOLLOW_MAP = {0: 0.7, 1: 1.20, 2: 1.40}
   PERSONALITY_NAMES = {0: "aggressive", 1: "standard", 2: "relaxed"}
 
   def _log_distance_change(self, distance_val, personality):
