@@ -63,6 +63,7 @@ class CarController(CarControllerBase):
 
     self.cancel_press_cnt = 0
     self.last_cancel_press = 0
+    self._prev_accel_cmd = 0.0
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -138,14 +139,26 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # Stock ACC blending: min(stock, op) when low-speed or braking.
-        # Low speed: prevents creep toward stopped cars in traffic.
-        # Braking: ensures we always brake at least as hard as the harder request.
-        # Accelerating at cruise: let openpilot through so T_FOLLOW controls gap.
+        # Rate-limit openpilot's output to suppress MPC oscillation.
+        # Symmetric 0.5/frame at 50 Hz prevents sign-flip oscillation:
+        # crossing zero takes 2+ frames, turning throttle/brake pulses
+        # into gentle accel/coast instead.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
+        accel_raw = accel_cmd
+        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + 0.5)
+
+        # Stock ACC blending for low-speed and mild braking
         if CS.out.vEgo < 2.5 or accel_cmd < 0:
           accel_cmd = min(stock_scaled, accel_cmd)
+
+        # Safety override: bypass rate limit when real braking is needed.
+        # Threshold -10 units (~0.56 m/s²) separates genuine braking from
+        # MPC oscillation noise (typically < ±0.3 m/s² = ±5.4 units).
+        if stock_scaled < -10.0 or accel_raw < -10.0:
+          accel_cmd = min(stock_scaled, accel_raw)
+
+        self._prev_accel_cmd = accel_cmd
 
         can_sends.append(create_acc_cmd(self.packer, accel_cmd, CC.longActive, CS.out.gasPressed,
                                         standstill_request, self.resume, CS.out.brakePressed))
