@@ -412,7 +412,7 @@ class LongitudinalMpc:
       v_lead = max(radarstate.leadOne.vLead, 0.)
       stopped_factor = max(0., 1. - v_lead / 5.)
       if stopped_factor > 0.:
-        boost = np.interp(v_ego, [0., 5., 30.], [0., 0., 0.5]) * stopped_factor
+        boost = np.interp(v_ego, [0., 5., 30.], [0., 0., 1.0]) * stopped_factor
         self.params[:,4] = t_follow + boost
 
     self.run()
