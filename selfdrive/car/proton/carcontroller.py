@@ -138,11 +138,14 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
+        # Stock ACC blending: min(stock, op) when low-speed or braking.
+        # Low speed: prevents creep toward stopped cars in traffic.
+        # Braking: ensures we always brake at least as hard as the harder request.
+        # Accelerating at cruise: let openpilot through so T_FOLLOW controls gap.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
-        if CS.out.vEgo < 2.5:
-          accel_cmd = (CS.stock_acc_cmd * mult + accel_cmd)/2
-        else:
-          accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
+        stock_scaled = CS.stock_acc_cmd * mult
+        if CS.out.vEgo < 2.5 or accel_cmd < 0:
+          accel_cmd = min(stock_scaled, accel_cmd)
 
         can_sends.append(create_acc_cmd(self.packer, accel_cmd, CC.longActive, CS.out.gasPressed,
                                         standstill_request, self.resume, CS.out.brakePressed))

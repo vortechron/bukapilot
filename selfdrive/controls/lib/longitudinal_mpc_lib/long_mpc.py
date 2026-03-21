@@ -54,7 +54,7 @@ T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
-STOP_DISTANCE = 5.5
+STOP_DISTANCE = 4.0
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -71,9 +71,9 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.40
   elif personality==log.LongitudinalPersonality.standard:
-    return 1.25
-  elif personality==log.LongitudinalPersonality.aggressive:
     return 1.20
+  elif personality==log.LongitudinalPersonality.aggressive:
+    return 0.7
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
@@ -330,7 +330,7 @@ class LongitudinalMpc:
     self.cruise_min_a = min_a
     self.max_a = max_a
 
-  def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
+  def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard, v_curve=None):
     t_follow = get_T_FOLLOW(personality)
     v_ego = self.x0[1]
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
@@ -359,8 +359,18 @@ class LongitudinalMpc:
                                  v_lower,
                                  v_upper)
       cruise_obstacle = np.cumsum(T_DIFFS * v_cruise_clipped) + get_safe_obstacle_distance(v_cruise_clipped, t_follow)
-      x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
-      self.source = SOURCES[np.argmin(x_obstacles[0])]
+
+      # Curve speed obstacle: virtual obstacle at the distance where the car
+      # must have slowed to the curve-safe speed
+      if v_curve is not None:
+        v_curve_clipped = np.clip(v_curve, v_lower, v_upper)
+        curve_obstacle = np.cumsum(T_DIFFS * v_curve_clipped) + get_safe_obstacle_distance(v_curve_clipped, t_follow)
+        x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle, curve_obstacle])
+        source_labels = ['lead0', 'lead1', 'cruise', 'cruise']
+      else:
+        x_obstacles = np.column_stack([lead_0_obstacle, lead_1_obstacle, cruise_obstacle])
+        source_labels = SOURCES[:3]
+      self.source = source_labels[np.argmin(x_obstacles[0])]
 
       # These are not used in ACC mode
       x[:], v[:], a[:], j[:] = 0.0, 0.0, 0.0, 0.0
@@ -393,6 +403,17 @@ class LongitudinalMpc:
     self.params[:,2] = np.min(x_obstacles, axis=1)
     self.params[:,3] = np.copy(self.prev_a)
     self.params[:,4] = t_follow
+
+    # Boost t_follow when approaching stopped/slow lead for earlier braking.
+    # The solver's high A_CHANGE_COST (200) delays braking onset. Increasing
+    # t_follow increases desired_dist inside the solver, triggering both cost
+    # and constraint earlier. Fades with ego speed AND lead speed.
+    if radarstate.leadOne.status:
+      v_lead = max(radarstate.leadOne.vLead, 0.)
+      stopped_factor = max(0., 1. - v_lead / 5.)
+      if stopped_factor > 0.:
+        boost = np.interp(v_ego, [0., 5., 30.], [0., 0., 0.5]) * stopped_factor
+        self.params[:,4] = t_follow + boost
 
     self.run()
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
