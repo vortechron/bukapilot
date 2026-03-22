@@ -224,6 +224,19 @@ if self.log_counter % 100 == 0:  # ~once per second in 100Hz loop
     print(f">>> speed: {CS.vEgo}")
 ```
 
+### Method 5: DebugLogger (structured JSONL for longitudinal tuning)
+```python
+from openpilot.common.debug_logger import DebugLogger
+
+dbg = DebugLogger("my_module")  # writes to /tmp/bp_debug_my_module.jsonl
+dbg.log({"vEgo": 27.8, "accel": 0.5})  # throttled to 10Hz, buffered
+```
+- **Files**: `/tmp/bp_debug_long_ctrl.jsonl`, `long_plan.jsonl`, `long_mpc.jsonl`
+- **Fetch**: `./tools/fetch_debug_logs.sh [output_dir]`
+- **Format**: One JSON object per line, auto-timestamped (`_t` = epoch, `_m` = monotonic)
+- **Safety**: 5MB cap per file, 1 backup, buffered writes (50 entries), never crashes caller
+- **Signals logged**: accel commands, stock ACC, rate limiter, lead data, t_follow, curve speed, MPC source
+
 ## Safe Directories to Modify
 
 ```

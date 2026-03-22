@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N, get_speed_error
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.debug_logger import DebugLogger
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MIN = -1.2
@@ -105,6 +106,7 @@ class LongitudinalPlanner:
     self.param_read_counter = 0
     self.read_param()
     self.personality = log.LongitudinalPersonality.standard
+    self._dbg = DebugLogger("long_plan")
 
   def read_param(self):
     try:
@@ -195,6 +197,18 @@ class LongitudinalPlanner:
     a_prev = self.a_desired
     self.a_desired = float(interp(self.dt, ModelConstants.T_IDXS[:CONTROL_N], self.a_desired_trajectory))
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.a_desired + a_prev) / 2.0
+
+    self._dbg.log({
+      "vEgo": round(v_ego, 2),
+      "aDesired": round(self.a_desired, 3),
+      "vCruise": round(v_cruise, 1),
+      "aLimLo": round(accel_limits_turns[0], 2),
+      "aLimHi": round(accel_limits_turns[1], 2),
+      "vCurveMin": round(float(np.min(v_curve_mpc)), 1) if v_curve_mpc is not None else -1,
+      "steerAng": round(sm['carState'].steeringAngleDeg, 1),
+      "standstill": sm['carState'].standstill,
+      "personality": int(self.personality),
+    })
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')

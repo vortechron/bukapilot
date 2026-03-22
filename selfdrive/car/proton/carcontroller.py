@@ -6,6 +6,7 @@ from openpilot.common.numpy_fast import clip, interp
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.features import Features
 from time import monotonic
+from openpilot.common.debug_logger import DebugLogger
 
 def apply_proton_steer_torque_limits(apply_torque, apply_torque_last, driver_torque, LIMITS):
 
@@ -64,6 +65,7 @@ class CarController(CarControllerBase):
     self.cancel_press_cnt = 0
     self.last_cancel_press = 0
     self._prev_accel_cmd = 0.0
+    self._dbg = DebugLogger("long_ctrl")
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -159,6 +161,18 @@ class CarController(CarControllerBase):
           accel_cmd = min(stock_scaled, accel_raw)
 
         self._prev_accel_cmd = accel_cmd
+
+        self._dbg.log({
+          "vEgo": round(CS.out.vEgo, 2),
+          "aRaw": round(accel_raw, 2),
+          "aCmd": round(accel_cmd, 2),
+          "aStock": round(stock_scaled, 2),
+          "aPrev": round(self._prev_accel_cmd, 2),
+          "gas": CS.out.gasPressed,
+          "stndstl": CS.out.standstill,
+          "resume": self.resume,
+          "longAct": CC.longActive,
+        })
 
         can_sends.append(create_acc_cmd(self.packer, accel_cmd, CC.longActive, CS.out.gasPressed,
                                         standstill_request, self.resume, CS.out.brakePressed))

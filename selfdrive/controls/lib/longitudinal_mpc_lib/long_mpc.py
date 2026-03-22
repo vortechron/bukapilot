@@ -5,6 +5,7 @@ import numpy as np
 from cereal import log
 from openpilot.common.numpy_fast import clip
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.debug_logger import DebugLogger
 # WARNING: imports outside of constants will not trigger a rebuild
 from openpilot.selfdrive.modeld.constants import index_function
 from openpilot.selfdrive.car.interfaces import ACCEL_MIN
@@ -225,6 +226,8 @@ class LongitudinalMpc:
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = SOURCES[2]
+    self.t_follow_actual = get_T_FOLLOW()
+    self._dbg = DebugLogger("long_mpc")
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -403,6 +406,7 @@ class LongitudinalMpc:
     self.params[:,2] = np.min(x_obstacles, axis=1)
     self.params[:,3] = np.copy(self.prev_a)
     self.params[:,4] = t_follow
+    self.t_follow_actual = t_follow
 
     # Boost t_follow when approaching stopped/slow lead for earlier braking.
     # The solver's high A_CHANGE_COST (200) delays braking onset. Increasing
@@ -414,6 +418,7 @@ class LongitudinalMpc:
       if stopped_factor > 0.:
         boost = np.interp(v_ego, [0., 5., 30.], [0., 0., 1.0]) * stopped_factor
         self.params[:,4] = t_follow + boost
+        self.t_follow_actual = t_follow + boost
 
     self.run()
     if (np.any(lead_xv_0[FCW_IDXS,0] - self.x_sol[FCW_IDXS,0] < CRASH_DISTANCE) and
@@ -421,6 +426,20 @@ class LongitudinalMpc:
       self.crash_cnt += 1
     else:
       self.crash_cnt = 0
+
+    lead = radarstate.leadOne
+    self._dbg.log({
+      "tF": round(self.t_follow_actual, 3),
+      "dRel": round(lead.dRel, 2) if lead.status else -1,
+      "vLead": round(lead.vLead, 2) if lead.status else -1,
+      "aLead": round(lead.aLeadK, 2) if lead.status else -1,
+      "leadSt": lead.status,
+      "src": self.source,
+      "aS0": round(self.a_solution[0], 3),
+      "aS1": round(self.a_solution[1], 3),
+      "vEgo": round(v_ego, 2),
+      "solSt": self.solution_status,
+    })
 
     # Check if it got within lead comfort range
     # TODO This should be done cleaner
