@@ -141,18 +141,16 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # Rate-limit openpilot's output to suppress MPC oscillation.
-        # Symmetric 0.5/frame at 50 Hz prevents sign-flip oscillation:
-        # crossing zero takes 2+ frames, turning throttle/brake pulses
-        # into gentle accel/coast instead.
+        # Asymmetric rate limiter: gentle throttle ramp (+0.2/frame),
+        # faster brake response (-0.5/frame). At 50 Hz, throttle takes
+        # ~5x longer to ramp up, giving a smooth, non-aggressive feel.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
-        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + 0.5)
+        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + 0.2)
 
-        # Stock ACC blending for low-speed and mild braking
-        if CS.out.vEgo < 2.5 or accel_cmd < 0:
-          accel_cmd = min(stock_scaled, accel_cmd)
+        # Stock ACC caps both throttle and braking — never exceed stock.
+        accel_cmd = min(stock_scaled, accel_cmd)
 
         # Safety override: bypass rate limit when real braking is needed.
         # Threshold -10 units (~0.56 m/s²) separates genuine braking from
