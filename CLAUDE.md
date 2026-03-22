@@ -62,18 +62,18 @@ fingerprints.py  → CAN ID fingerprints per vehicle model
 This is a fork of [kommuai/bukapilot](https://github.com/kommuai/bukapilot), which is itself a fork of [commaai/openpilot](https://github.com/commaai/openpilot). bukapilot is an open-source ADAS (Advanced Driver Assistance System) providing Adaptive Cruise Control (ACC), Lane Keep Assist (LKA), Forward Collision Warning (FCW), and Lane Departure Warning (LDW) for Malaysian vehicles (Proton, Perodua).
 
 - **Base branch:** `release_ka2` (the stable release from kommuai)
-- **Hardware:** KommuAssist2 dongle running a stripped-down Linux OS
+- **Hardware:** KommuAssist2 dongle running Ubuntu 24.04 LTS (aarch64)
 - **Target vehicle:** Proton X50 FL
 - **App version:** KommuApp 1.0.14 (Build 89)
 - **Bukapilot version on device:** 10.0.5-release
-- **OS on device:** 11.3.2
+- **OS on device:** Ubuntu 24.04.3 LTS (Noble Numbat)
 
 ## Device Details
 
 - **Dongle ID:** `9fcbe17abd7b08d8`
-- **Device Wi-Fi IP:** `192.168.0.64`
+- **Tailscale IP:** `100.82.157.42` (preferred — works from any network)
+- **Device Wi-Fi IP:** varies by network
 - **Hotspot IP:** `192.168.69.1`
-- **Network:** Wi-Fi (SSID: Lara)
 - **Code location on device:** `/data/openpilot`
 - **Drive logs location:** `/data/media/0/realdata/`
 - **SSH user:** `kommu`
@@ -105,12 +105,14 @@ bukapilot runs multiple processes that communicate with each other (like microse
 
 ### Connect
 ```bash
-ssh kommu@192.168.0.64
-# or if using a specific key file:
-ssh kommu@192.168.0.64 -i ~/.ssh/id_ed25519
+# Preferred: via Tailscale (works from any network)
+ssh kommu@100.82.157.42
+
+# Fallback: via local Wi-Fi (must be on same network)
+ssh kommu@<device-wifi-ip>
 ```
 
-Device and development machine must be on the same Wi-Fi network.
+Tailscale is installed on the dongle — SSH works from any network without port forwarding.
 
 ## tmux (Process Viewer)
 
