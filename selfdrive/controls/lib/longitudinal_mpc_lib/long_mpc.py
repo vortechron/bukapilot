@@ -220,6 +220,9 @@ def gen_long_ocp():
   return ocp
 
 
+LEAD_PERSIST_FRAMES = 15  # keep ghost lead for ~3s at 5Hz MPC rate
+
+
 class LongitudinalMpc:
   def __init__(self, mode='acc'):
     self.mode = mode
@@ -228,6 +231,13 @@ class LongitudinalMpc:
     self.source = SOURCES[2]
     self.t_follow_actual = get_T_FOLLOW()
     self._dbg = DebugLogger("long_mpc")
+
+    # Lead persistence: remember last known lead to avoid cruise snap-back
+    # when vision lead detection flickers (camera-only, no radar).
+    self._last_lead_x = 0.0
+    self._last_lead_v = 0.0
+    self._last_lead_a = 0.0
+    self._lead_gone_frames = LEAD_PERSIST_FRAMES  # start expired
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -311,6 +321,23 @@ class LongitudinalMpc:
       v_lead = lead.vLead
       a_lead = lead.aLeadK
       a_lead_tau = lead.aLeadTau
+      # Remember this lead for persistence
+      self._last_lead_x = x_lead
+      self._last_lead_v = v_lead
+      self._last_lead_a = a_lead
+      self._lead_gone_frames = 0
+    elif self._lead_gone_frames < LEAD_PERSIST_FRAMES:
+      # Lead just dropped — use decayed last-known position.
+      # Extrapolate position forward, assume lead coasts (a=0).
+      self._lead_gone_frames += 1
+      dt = 0.2  # MPC step
+      self._last_lead_x += self._last_lead_v * dt
+      self._last_lead_v = max(self._last_lead_v + self._last_lead_a * dt, 0.)
+      self._last_lead_a *= 0.8  # decay accel toward zero
+      x_lead = self._last_lead_x
+      v_lead = self._last_lead_v
+      a_lead = self._last_lead_a
+      a_lead_tau = _LEAD_ACCEL_TAU
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
       x_lead = 50.0
