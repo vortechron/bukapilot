@@ -154,10 +154,16 @@ class CarController(CarControllerBase):
         accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
         # Stock caps braking only — OP brakes at least as hard as stock.
-        # Throttle is uncapped so OP can actually close to T_FOLLOW=0.8s
-        # (stock follows at ~1.5s, would prevent close following if capped).
+        # Throttle is uncapped so OP can actually close to T_FOLLOW=0.8s.
+        # Smooth transition: stock brake ramps at -2.0/frame (not instant) to
+        # prevent the "gentle throttle → HARD brake" jerk in stop-and-go.
+        # Hard braking (< -15 CAN ≈ 0.83 m/s²) bypasses for safety.
         if stock_scaled < 0:
-          accel_cmd = min(stock_scaled, accel_cmd)
+          stock_brake = min(stock_scaled, accel_raw)
+          if stock_brake < -15:
+            accel_cmd = stock_brake
+          else:
+            accel_cmd = max(stock_brake, self._prev_accel_cmd - 2.0)
 
         self._prev_accel_cmd = accel_cmd
 
