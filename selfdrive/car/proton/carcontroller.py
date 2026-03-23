@@ -141,13 +141,14 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # Asymmetric rate limiter: gentle throttle ramp (+0.2/frame),
-        # faster brake response (-0.5/frame). At 50 Hz, throttle takes
-        # ~5x longer to ramp up, giving a smooth, non-aggressive feel.
+        # Asymmetric rate limiter: gentle throttle ramp, faster brake response.
+        # Recovery mode: +0.4/frame when transitioning from brake to throttle,
+        # so car can close gap after braking. Normal: +0.2/frame for gentle feel.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
-        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + 0.2)
+        throttle_rate = 0.4 if self._prev_accel_cmd < 0 else 0.2
+        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
         # Stock ACC caps both throttle and braking — never exceed stock.
         accel_cmd = min(stock_scaled, accel_cmd)

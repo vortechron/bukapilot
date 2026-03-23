@@ -237,7 +237,7 @@ dbg.log({"vEgo": 27.8, "accel": 0.5})  # throttled to 10Hz, buffered
 - **Fetch**: `./tools/fetch_debug_logs.sh [output_dir]`
 - **Format**: One JSON object per line, auto-timestamped (`_t` = epoch, `_m` = monotonic)
 - **Safety**: 5MB cap per file, 1 backup, buffered writes (50 entries), never crashes caller
-- **Signals logged**: accel commands, stock ACC, rate limiter, lead data, t_follow, curve speed, MPC source
+- **Signals logged**: accel commands, stock ACC, rate limiter, lead data, t_follow, MPC source
 
 ## Safe Directories to Modify
 
@@ -356,7 +356,7 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
                                               │
                                     carcontroller.py (50Hz)
                                      ├── scale: ×15 throttle / ×18 brake
-                                     ├── rate limit: +0.2/-0.5 per frame
+                                     ├── rate limit: +0.2 (+0.4 recovery)/-0.5 per frame
                                      ├── stock cap: min(stock, OP)
                                      └── safety override: bypass if < -10
                                               │
@@ -388,17 +388,11 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 | `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
 | `LEAD_PERSIST_FRAMES` | 15 | Ghost lead for ~3s on camera flicker |
 
-**Curve Speed** (`longitudinal_planner.py`):
-| Param | Value | Effect |
-|-------|-------|--------|
-| `A_LAT_MAX_CURVE` | 1.5 m/s² | Max lateral accel before speed limiting |
-| `MIN_CURVE_SPEED` | 5.0 m/s | Floor speed in curves |
-| `CURVE_BRAKING_FACTOR` | 0.4 | Active braking = a_y × 0.4 |
-
 **Rate Limiter** (`carcontroller.py`):
 | Direction | Per frame (50Hz) | Per second |
 |-----------|-----------------|-----------|
-| Throttle | +0.2 CAN units | +10/s |
+| Throttle (normal) | +0.2 CAN units | +10/s |
+| Throttle (recovery from brake) | +0.4 CAN units | +20/s |
 | Brake | -0.5 CAN units | -25/s |
 
 **Stopping** (`interface.py`):
@@ -419,11 +413,11 @@ accel_cmd = min(stock_scaled, accel_cmd)      # never exceed stock
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | Close follow distance | ✅ T_FOLLOW=0.8s, STOP_DIST=4.0m |
+| 1 | Close follow distance | ✅ T_FOLLOW=0.8s, STOP_DIST=4.0m, no boost |
 | 2 | Fix creep in jams | ✅ Stock cap + rate limiter |
 | 3 | Fix incomplete stop | ✅ stopAccel=-1.0, lead persistence |
-| 4 | Fix slow accel from stop | ⚠️ Needs testing |
-| 5 | No phantom curve braking | ⚠️ Needs road testing |
+| 4 | Fix slow accel from stop | ⚠️ Recovery rate +0.4, needs testing |
+| 5 | Curve speed | ❌ Removed by user request |
 
 ### Tuning Lessons
 
@@ -433,6 +427,8 @@ accel_cmd = min(stock_scaled, accel_cmd)      # never exceed stock
 4. **Stock ACC cap always** — `min(stock, OP)` is the right safety layer
 5. **Camera-only needs lead persistence** — X50 FL drops lead 67% of frames
 6. **Asymmetric rates** — slow throttle (+0.2), fast brake (-0.5) matches human expectations
+7. **Don't boost t_follow** — stopped-lead boost made follow distance feel far; trust T_FOLLOW=0.8s as-is
+8. **Recovery rate > uniform rate** — after braking, use faster throttle rate (+0.4) to close gap, then gentle (+0.2) for steady follow
 
 ## Project Structure (Key Directories)
 ```

@@ -27,11 +27,6 @@ A_CRUISE_MAX_BP = [0., 10.0, 25., 40.]
 _A_TOTAL_MAX_V = [1.7, 3.2]
 _A_TOTAL_MAX_BP = [20., 40.]
 
-# Predictive curve speed limiting
-A_LAT_MAX_CURVE = 1.5      # max lateral accel in curves (m/s²)
-MIN_CURVE_SPEED = 5.0      # floor speed in curves (m/s, ~18 km/h)
-CURVE_BRAKING_FACTOR = 0.4  # reactive braking proportional to current lateral accel
-
 
 def get_max_accel(v_ego):
   return interp(v_ego, A_CRUISE_MAX_BP, A_CRUISE_MAX_VALS)
@@ -40,8 +35,7 @@ def get_max_accel(v_ego):
 def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
   """
   This function returns a limited long acceleration allowed, depending on the existing lateral acceleration
-  this should avoid accelerating when losing the target in turns.
-  Also applies active braking when lateral accel is high.
+  this should avoid accelerating when losing the target in turns
   """
 
   # FIXME: This function to calculate lateral accel is incorrect and should use the VehicleModel
@@ -50,41 +44,8 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
   a_y = v_ego ** 2 * angle_steers * CV.DEG_TO_RAD / (CP.steerRatio * CP.wheelbase)
   a_x_allowed = math.sqrt(max(a_total_max ** 2 - a_y ** 2, 0.))
 
-  # Active braking: push decel floor negative when lateral accel is high
-  a_y_abs = abs(a_y)
-  a_target_lower = a_target[0]
-  if a_y_abs > 1.0:
-    a_target_lower = min(a_target[0], max(-a_y_abs * CURVE_BRAKING_FACTOR, A_CRUISE_MIN))
+  return [a_target[0], min(a_target[1], a_x_allowed)]
 
-  return [a_target_lower, min(a_target[1], a_x_allowed)]
-
-
-def get_curve_v_max(model_msg):
-  """Compute max safe speed per MPC timestep from the model's predicted path curvature."""
-  if len(model_msg.orientation.z) != 33 or len(model_msg.position.x) != 33:
-    return None
-
-  orientations = np.array(model_msg.orientation.z)
-  positions_x = np.array(model_msg.position.x)
-
-  # Curvature: kappa = |delta_yaw / delta_x|
-  dx = np.diff(positions_x)
-  dyaw = np.diff(orientations)
-
-  # Non-monotonic position data means model prediction is unusable
-  if np.any(dx < 0.1):
-    return None
-
-  dx = np.maximum(dx, 0.5)
-  curvatures = np.abs(dyaw / dx)
-
-  # Safe speed: v = sqrt(a_lat_max / kappa), floored at MIN_CURVE_SPEED
-  v_safe = np.sqrt(A_LAT_MAX_CURVE / np.maximum(curvatures, 1e-4))
-  v_safe = np.maximum(v_safe, MIN_CURVE_SPEED)
-
-  # Pad to 33 points (curvature has 32 from diff) and interpolate to MPC timesteps
-  v_safe_full = np.insert(v_safe, 0, v_safe[0])
-  return np.interp(T_IDXS_MPC, ModelConstants.T_IDXS, v_safe_full)
 
 
 class LongitudinalPlanner:
@@ -177,10 +138,7 @@ class LongitudinalPlanner:
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
     x, v, a, j = self.parse_model(sm['modelV2'], self.v_model_error)
 
-    # Predictive curve speed limiting from model's predicted path curvature
-    v_curve_mpc = get_curve_v_max(sm['modelV2'])
-
-    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=self.personality, v_curve=v_curve_mpc)
+    self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=self.personality)
 
     self.v_desired_trajectory_full = np.interp(ModelConstants.T_IDXS, T_IDXS_MPC, self.mpc.v_solution)
     self.a_desired_trajectory_full = np.interp(ModelConstants.T_IDXS, T_IDXS_MPC, self.mpc.a_solution)
@@ -204,7 +162,6 @@ class LongitudinalPlanner:
       "vCruise": round(v_cruise, 1),
       "aLimLo": round(accel_limits_turns[0], 2),
       "aLimHi": round(accel_limits_turns[1], 2),
-      "vCurveMin": round(float(np.min(v_curve_mpc)), 1) if v_curve_mpc is not None else -1,
       "steerAng": round(sm['carState'].steeringAngleDeg, 1),
       "standstill": sm['carState'].standstill,
       "personality": int(self.personality),
