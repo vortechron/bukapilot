@@ -141,13 +141,16 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # Rate limiter: gentle throttle ramp (+0.2/frame), fast brake (-0.5/frame).
-        # Damps MPC oscillation around desired distance — without this, car hunts
-        # (throttle-brake-throttle). Lead persistence handles vision dropout spikes.
+        # Speed-dependent rate limiter: gentler at low speed where MPC oscillation
+        # is most noticeable (and where brake light flashing annoys drivers behind).
+        # At 0 m/s: +0.1/frame (very smooth in stop-and-go traffic)
+        # At 15+ m/s (54 km/h): +0.2/frame (responsive at highway speed)
+        # Brake rate is always fast (-0.5/frame) for safety.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
-        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + 0.2)
+        throttle_rate = interp(CS.out.vEgo, [0., 15.], [0.1, 0.2])
+        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
         # Stock caps braking only — OP brakes at least as hard as stock.
         # Throttle is uncapped so OP can actually close to T_FOLLOW=0.8s
