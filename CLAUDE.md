@@ -356,9 +356,8 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
                                               │
                                     carcontroller.py (50Hz)
                                      ├── scale: ×15 throttle / ×18 brake
-                                     ├── rate limit: +0.2 (+0.4 recovery)/-0.5 per frame
-                                     ├── stock cap: min(stock, OP)
-                                     └── safety override: bypass if < -10
+                                     ├── stock brake cap: min(stock, OP) when stock < 0
+                                     └── throttle: uncapped (lead persistence provides safety)
                                               │
                                     protoncan.create_acc_cmd() → CAN bus
 ```
@@ -388,12 +387,10 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 | `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
 | `LEAD_PERSIST_FRAMES` | 15 | Ghost lead for ~3s on camera flicker |
 
-**Rate Limiter** (`carcontroller.py`):
-| Direction | Per frame (50Hz) | Per second |
-|-----------|-----------------|-----------|
-| Throttle (normal) | +0.2 CAN units | +10/s |
-| Throttle (recovery from brake) | +0.4 CAN units | +20/s |
-| Brake | -0.5 CAN units | -25/s |
+**Stock Blending** (`carcontroller.py`):
+- Throttle: uncapped — OP controls freely (lead persistence prevents spikes)
+- Braking: `min(stock_scaled, accel_cmd)` when stock < 0 — OP brakes at least as hard as stock
+- No rate limiter — MPC jerk cost + PID provide natural smoothness
 
 **Stopping** (`interface.py`):
 | Param | Value | Original |
@@ -406,17 +403,18 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 ```python
 mult = interp(vEgo, [0, 28.3], [1.0, 0.6])  # scale down at speed
 stock_scaled = stock_acc_cmd × mult
-accel_cmd = min(stock_scaled, accel_cmd)      # never exceed stock
+if stock_scaled < 0:
+    accel_cmd = min(stock_scaled, accel_cmd)  # brake cap only
 ```
 
 ### Branch Objectives (`release_ka2_amirul`)
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | Close follow distance | ✅ T_FOLLOW=0.8s, STOP_DIST=4.0m, no boost |
-| 2 | Fix creep in jams | ✅ Stock cap + rate limiter |
+| 1 | Close follow distance | ⚠️ T_FOLLOW=0.8s, brake-only stock cap, needs testing |
+| 2 | Fix creep in jams | ✅ Brake-only stock cap + lead persistence |
 | 3 | Fix incomplete stop | ✅ stopAccel=-1.0, lead persistence |
-| 4 | Fix slow accel from stop | ⚠️ Recovery rate +0.4, needs testing |
+| 4 | Fix slow accel from stop | ⚠️ Rate limiter removed, needs testing |
 | 5 | Curve speed | ❌ Removed by user request |
 
 ### Tuning Lessons
@@ -428,7 +426,8 @@ accel_cmd = min(stock_scaled, accel_cmd)      # never exceed stock
 5. **Camera-only needs lead persistence** — X50 FL drops lead 67% of frames
 6. **Asymmetric rates** — slow throttle (+0.2), fast brake (-0.5) matches human expectations
 7. **Don't boost t_follow** — stopped-lead boost made follow distance feel far; trust T_FOLLOW=0.8s as-is
-8. **Recovery rate > uniform rate** — after braking, use faster throttle rate (+0.4) to close gap, then gentle (+0.2) for steady follow
+8. **Stock cap blocks close following** — `min(stock, OP)` for throttle prevents OP from closing to T_FOLLOW=0.8s because stock follows at ~1.5s. Only cap braking.
+9. **Rate limiter was band-aid on wrong problem** — "aggressive throttle" was from lead dropout, not lack of smoothing. Lead persistence fixes root cause. MPC jerk cost provides smoothness.
 
 ## Project Structure (Key Directories)
 ```

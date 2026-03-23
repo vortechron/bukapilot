@@ -141,23 +141,18 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # Asymmetric rate limiter: gentle throttle ramp, faster brake response.
-        # Recovery mode: +0.4/frame when transitioning from brake to throttle,
-        # so car can close gap after braking. Normal: +0.2/frame for gentle feel.
+        # Stock ACC caps braking only — OP brakes at least as hard as stock.
+        # Throttle is uncapped: X50 FL is camera-only (stock has same sensors),
+        # lead persistence prevents throttle spikes from vision dropout, and
+        # MPC jerk cost (A_CHANGE_COST=200) provides natural smoothness.
+        # No rate limiter: the original "aggressive throttle" was caused by
+        # lead detection flicker, which lead persistence (15-frame ghost) fixes.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
-        throttle_rate = 0.4 if self._prev_accel_cmd < 0 else 0.2
-        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
-        # Stock ACC caps both throttle and braking — never exceed stock.
-        accel_cmd = min(stock_scaled, accel_cmd)
-
-        # Safety override: bypass rate limit when real braking is needed.
-        # Threshold -10 units (~0.56 m/s²) separates genuine braking from
-        # MPC oscillation noise (typically < ±0.3 m/s² = ±5.4 units).
-        if stock_scaled < -10.0 or accel_raw < -10.0:
-          accel_cmd = min(stock_scaled, accel_raw)
+        if stock_scaled < 0:
+          accel_cmd = min(stock_scaled, accel_cmd)
 
         self._prev_accel_cmd = accel_cmd
 
