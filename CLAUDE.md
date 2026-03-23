@@ -341,6 +341,99 @@ sudo reboot
 journalctl -f
 ```
 
+## Longitudinal Control Pipeline
+
+```
+modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
+                                              │
+                                         MPC solver (long_mpc.py)
+                                              │
+                                       a_solution (m/s²)
+                                              │
+                                    longcontrol.py (100Hz, PID)
+                                              │
+                                       actuators.accel
+                                              │
+                                    carcontroller.py (50Hz)
+                                     ├── scale: ×15 throttle / ×18 brake
+                                     ├── rate limit: +0.2/-0.5 per frame
+                                     ├── stock cap: min(stock, OP)
+                                     └── safety override: bypass if < -10
+                                              │
+                                    protoncan.create_acc_cmd() → CAN bus
+```
+
+### Tunable Longitudinal Parameters
+
+**Accel Limits** (`longitudinal_planner.py`):
+| Speed | A_CRUISE_MAX | A_CRUISE_MIN |
+|-------|-------------|-------------|
+| 0 km/h | 1.6 m/s² | -1.2 m/s² |
+| 36 km/h | 1.2 | -1.2 |
+| 90 km/h | 0.8 | -1.2 |
+| 144 km/h | 0.6 | -1.2 |
+
+**Follow Distance** (`long_mpc.py`):
+| Personality | T_FOLLOW | Gap at 90 km/h |
+|------------|----------|----------------|
+| Aggressive | 0.8s | ~20m |
+| Standard | 1.20s | ~30m |
+| Relaxed | 1.40s | ~35m |
+
+**MPC Constants** (`long_mpc.py`):
+| Param | Value | Effect |
+|-------|-------|--------|
+| `STOP_DISTANCE` | 4.0m | Buffer behind stopped lead |
+| `COMFORT_BRAKE` | 2.5 m/s² | Comfortable decel for gap calc |
+| `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
+| `LEAD_PERSIST_FRAMES` | 15 | Ghost lead for ~3s on camera flicker |
+
+**Curve Speed** (`longitudinal_planner.py`):
+| Param | Value | Effect |
+|-------|-------|--------|
+| `A_LAT_MAX_CURVE` | 1.5 m/s² | Max lateral accel before speed limiting |
+| `MIN_CURVE_SPEED` | 5.0 m/s | Floor speed in curves |
+| `CURVE_BRAKING_FACTOR` | 0.4 | Active braking = a_y × 0.4 |
+
+**Rate Limiter** (`carcontroller.py`):
+| Direction | Per frame (50Hz) | Per second |
+|-----------|-----------------|-----------|
+| Throttle | +0.2 CAN units | +10/s |
+| Brake | -0.5 CAN units | -25/s |
+
+**Stopping** (`interface.py`):
+| Param | Value | Original |
+|-------|-------|----------|
+| `stopAccel` | -1.0 m/s² | -0.8 |
+| `stoppingDecelRate` | 0.4 | 0.3 |
+| `startAccel` | 1.2 m/s² | 1.2 |
+
+**Stock ACC Blending** (`carcontroller.py`):
+```python
+mult = interp(vEgo, [0, 28.3], [1.0, 0.6])  # scale down at speed
+stock_scaled = stock_acc_cmd × mult
+accel_cmd = min(stock_scaled, accel_cmd)      # never exceed stock
+```
+
+### Branch Objectives (`release_ka2_amirul`)
+
+| # | Objective | Status |
+|---|-----------|--------|
+| 1 | Close follow distance | ✅ T_FOLLOW=0.8s, STOP_DIST=4.0m |
+| 2 | Fix creep in jams | ✅ Stock cap + rate limiter |
+| 3 | Fix incomplete stop | ✅ stopAccel=-1.0, lead persistence |
+| 4 | Fix slow accel from stop | ⚠️ Needs testing |
+| 5 | No phantom curve braking | ⚠️ Needs road testing |
+
+### Tuning Lessons
+
+1. **Rate limiter > accel ceiling** for comfort — don't lower A_CRUISE_MAX, use rate limiter
+2. **Change one parameter per test** — T_FOLLOW + accel + rate limiter are coupled
+3. **Add instrumentation first** — debug logger should be commit 1, not commit 4
+4. **Stock ACC cap always** — `min(stock, OP)` is the right safety layer
+5. **Camera-only needs lead persistence** — X50 FL drops lead 67% of frames
+6. **Asymmetric rates** — slow throttle (+0.2), fast brake (-0.5) matches human expectations
+
 ## Project Structure (Key Directories)
 ```
 ├── cereal/              # Messaging spec and serialization libs
