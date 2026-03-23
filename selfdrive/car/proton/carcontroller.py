@@ -141,16 +141,17 @@ class CarController(CarControllerBase):
         if CS.out.gasPressed:
           accel_cmd = 0
 
-        # Stock ACC caps braking only — OP brakes at least as hard as stock.
-        # Throttle is uncapped: X50 FL is camera-only (stock has same sensors),
-        # lead persistence prevents throttle spikes from vision dropout, and
-        # MPC jerk cost (A_CHANGE_COST=200) provides natural smoothness.
-        # No rate limiter: the original "aggressive throttle" was caused by
-        # lead detection flicker, which lead persistence (15-frame ghost) fixes.
+        # Rate limiter: gentle throttle ramp (+0.2/frame), fast brake (-0.5/frame).
+        # Damps MPC oscillation around desired distance — without this, car hunts
+        # (throttle-brake-throttle). Lead persistence handles vision dropout spikes.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
+        accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + 0.2)
 
+        # Stock caps braking only — OP brakes at least as hard as stock.
+        # Throttle is uncapped so OP can actually close to T_FOLLOW=0.8s
+        # (stock follows at ~1.5s, would prevent close following if capped).
         if stock_scaled < 0:
           accel_cmd = min(stock_scaled, accel_cmd)
 
