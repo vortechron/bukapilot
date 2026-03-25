@@ -153,12 +153,13 @@ class CarController(CarControllerBase):
         throttle_rate = interp(CS.out.vEgo, [0., 30., 33.], [0.1, 0.1, 0.2])
         accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
-        # Stock caps braking only — OP brakes at least as hard as stock.
-        # Throttle is uncapped so OP can actually close to T_FOLLOW=0.8s.
-        # Smooth transition: stock brake ramps at -2.0/frame (not instant) to
-        # prevent the "gentle throttle → HARD brake" jerk in stop-and-go.
-        # Hard braking (< -15 CAN ≈ 0.83 m/s²) bypasses for safety.
-        if stock_scaled < 0:
+        # Stock brake cap: only follow stock for real braking, not gap maintenance.
+        # Stock ACC follows at ~1.5s gap. OP targets 0.6s. If we follow ANY
+        # stock brake, stock's mild "too close" braking overrides OP, keeping
+        # the gap at stock's ~20m instead of OP's ~14m.
+        # Threshold -8 CAN (~0.44 m/s²): ignore mild gap-maintenance braking.
+        # Smooth transition at -2.0/frame for moderate; instant for hard (< -15).
+        if stock_scaled < -8:
           stock_brake = min(stock_scaled, accel_raw)
           if stock_brake < -15:
             accel_cmd = stock_brake
