@@ -376,7 +376,7 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 **Follow Distance** (`long_mpc.py`):
 | Personality | T_FOLLOW | Gap at 90 km/h |
 |------------|----------|----------------|
-| Aggressive | 0.8s | ~20m |
+| Aggressive | 0.6s | ~15m |
 | Standard | 1.20s | ~30m |
 | Relaxed | 1.40s | ~35m |
 
@@ -417,7 +417,7 @@ if stock_scaled < 0:
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | Close follow distance | ⚠️ T_FOLLOW=0.8s, brake-only stock cap + rate limiter, needs testing |
+| 1 | Close follow distance | ⚠️ T_FOLLOW=0.6s, brake-only stock cap + rate limiter, needs testing |
 | 2 | Fix creep in jams | ✅ Brake-only stock cap + lead persistence |
 | 3 | Fix incomplete stop | ✅ stopAccel=-1.0, lead persistence |
 | 4 | Fix slow accel from stop | ⚠️ Rate limiter +0.2 (gentle), needs testing |
