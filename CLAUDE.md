@@ -376,9 +376,9 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 **Follow Distance** (`long_mpc.py`):
 | Personality | T_FOLLOW | Gap at 90 km/h |
 |------------|----------|----------------|
-| Aggressive | 0.6s | ~15m |
-| Standard | 1.20s | ~30m |
-| Relaxed | 1.40s | ~35m |
+| Aggressive | 0.6s | ~19m |
+| Standard | 0.8s | ~24m |
+| Relaxed | 1.40s | ~39m |
 
 **MPC Constants** (`long_mpc.py`):
 | Param | Value | Effect |
@@ -391,12 +391,12 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 **Rate Limiter** (`carcontroller.py`):
 | Direction | Per frame (50Hz) | Per second |
 |-----------|-----------------|-----------|
-| Throttle | +0.2 CAN units | +10/s |
+| Throttle | +0.15 CAN units (≤108 km/h), +0.25 (119+ km/h) | +7.5/s / +12.5/s |
 | Brake | -0.5 CAN units | -25/s |
 
 **Stock Blending** (`carcontroller.py`):
 - Throttle: uncapped — OP can close to T_FOLLOW=0.8s (stock follows at ~1.5s)
-- Braking: `min(stock_scaled, accel_cmd)` when stock < 0 — OP brakes at least as hard as stock
+- Braking: `min(stock_scaled, accel_cmd)` when stock < -15 CAN — ignores gap-maintenance braking
 
 **Stopping** (`interface.py`):
 | Param | Value | Original |
@@ -409,18 +409,18 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 ```python
 mult = interp(vEgo, [0, 28.3], [1.0, 0.6])  # scale down at speed
 stock_scaled = stock_acc_cmd × mult
-if stock_scaled < 0:
-    accel_cmd = min(stock_scaled, accel_cmd)  # brake cap only
+if stock_scaled < -15:                          # ignore gap-maintenance braking
+    accel_cmd = min(stock_scaled, accel_cmd)    # only follow real braking
 ```
 
 ### Branch Objectives (`release_ka2_amirul`)
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | Close follow distance | ⚠️ T_FOLLOW=0.6s, brake-only stock cap + rate limiter, needs testing |
+| 1 | Close follow distance | ⚠️ T_FOLLOW std=0.8s/agg=0.6s, stock cap -15 CAN (ignore gap maint), needs testing |
 | 2 | Fix creep in jams | ✅ Brake-only stock cap + lead persistence |
 | 3 | Fix incomplete stop | ✅ stopAccel=-1.0, lead persistence |
-| 4 | Fix slow accel from stop | ⚠️ Rate limiter +0.2 (gentle), needs testing |
+| 4 | Fix slow accel from stop | ⚠️ Rate limiter +0.15 (slightly faster), needs testing |
 | 5 | Curve speed | ❌ Removed by user request |
 
 ### Tuning Lessons
