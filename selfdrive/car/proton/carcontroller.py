@@ -143,25 +143,25 @@ class CarController(CarControllerBase):
 
         # Speed-dependent rate limiter: gentler below 110 km/h where MPC oscillation
         # is most noticeable (and where brake light flashing annoys drivers behind).
-        # At 0 m/s: +0.15/frame (smooth in stop-and-go, responsive enough to avoid lag)
-        # At 30 m/s (108 km/h): +0.15/frame (smooth on highway)
-        # At 33+ m/s (119 km/h): +0.25/frame (responsive at high speed)
+        # At 0 m/s: +0.1/frame (very smooth in stop-and-go)
+        # At 30 m/s (108 km/h): +0.1/frame (still smooth on highway)
+        # At 33+ m/s (119 km/h): +0.2/frame (responsive at high speed)
         # Brake rate is always fast (-0.5/frame) for safety.
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
-        throttle_rate = interp(CS.out.vEgo, [0., 30., 33.], [0.15, 0.15, 0.25])
+        throttle_rate = interp(CS.out.vEgo, [0., 30., 33.], [0.1, 0.1, 0.2])
         accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
         # Stock brake cap: only follow stock for real braking, not gap maintenance.
-        # Stock ACC follows at ~1.5s gap. OP targets 0.6–0.8s. Stock applies
-        # continuous -10 to -20 CAN gap-maintenance braking in that zone —
-        # must ignore it entirely or OP can never close.
-        # Threshold -15 CAN (~0.83 m/s²): only follow real braking, not gap maintenance.
-        # Smooth transition at -2.0/frame for moderate; instant for hard (< -25).
-        if stock_scaled < -15:
+        # Stock ACC follows at ~1.5s gap. OP targets 0.6s. If we follow ANY
+        # stock brake, stock's mild "too close" braking overrides OP, keeping
+        # the gap at stock's ~20m instead of OP's ~14m.
+        # Threshold -8 CAN (~0.44 m/s²): ignore mild gap-maintenance braking.
+        # Smooth transition at -2.0/frame for moderate; instant for hard (< -15).
+        if stock_scaled < -8:
           stock_brake = min(stock_scaled, accel_raw)
-          if stock_brake < -25:
+          if stock_brake < -15:
             accel_cmd = stock_brake
           else:
             accel_cmd = max(stock_brake, self._prev_accel_cmd - 2.0)
