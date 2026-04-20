@@ -153,20 +153,18 @@ class CarController(CarControllerBase):
         throttle_rate = interp(CS.out.vEgo, [0., 30., 33.], [0.15, 0.15, 0.25])
         accel_cmd = clip(accel_cmd, self._prev_accel_cmd - 0.5, self._prev_accel_cmd + throttle_rate)
 
-        # Stock brake cap: speed-gated.
-        # High speed (>100 km/h cruise): OP autonomous, threshold -15, hard override -25.
-        # Low speed (<72 km/h follow with 1-bar): stock's natural damping returns at
-        # threshold -8 to kill oscillation; softer override -18 and slower ramp -1.2/frame
-        # prevent hard-brake snap when a decelerating lead pushes the gap below 0.6s.
-        stock_threshold  = interp(CS.out.vEgo, [20., 28.], [-8.,  -15.])
-        hard_override    = interp(CS.out.vEgo, [20., 28.], [-18., -25.])
-        brake_transition = interp(CS.out.vEgo, [20., 28.], [-1.2, -2.0])
-        if stock_scaled < stock_threshold:
+        # Stock brake cap: only follow stock for real braking, not gap maintenance.
+        # Stock ACC follows at ~1.5s gap. OP targets 0.6–0.8s. Stock applies
+        # continuous -10 to -20 CAN gap-maintenance braking in that zone —
+        # must ignore it entirely or OP can never close.
+        # Threshold -15 CAN (~0.83 m/s²): only follow real braking, not gap maintenance.
+        # Smooth transition at -2.0/frame for moderate; instant for hard (< -25).
+        if stock_scaled < -15:
           stock_brake = min(stock_scaled, accel_raw)
-          if stock_brake < hard_override:
+          if stock_brake < -25:
             accel_cmd = stock_brake
           else:
-            accel_cmd = max(stock_brake, self._prev_accel_cmd + brake_transition)
+            accel_cmd = max(stock_brake, self._prev_accel_cmd - 2.0)
 
         self._prev_accel_cmd = accel_cmd
 
