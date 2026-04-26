@@ -16,6 +16,7 @@ from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import Longi
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N, get_speed_error
 from openpilot.common.swaglog import cloudlog
+from openpilot.common.debug_logger import DebugLogger
 
 LON_MPC_STEP = 0.2  # first step is 0.2s
 A_CRUISE_MIN = -1.2
@@ -46,6 +47,7 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
   return [a_target[0], min(a_target[1], a_x_allowed)]
 
 
+
 class LongitudinalPlanner:
   def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
     self.CP = CP
@@ -65,6 +67,7 @@ class LongitudinalPlanner:
     self.param_read_counter = 0
     self.read_param()
     self.personality = log.LongitudinalPersonality.standard
+    self._dbg = DebugLogger("long_plan")
 
   def read_param(self):
     try:
@@ -134,6 +137,7 @@ class LongitudinalPlanner:
     self.mpc.set_accel_limits(accel_limits_turns[0], accel_limits_turns[1])
     self.mpc.set_cur_state(self.v_desired_filter.x, self.a_desired)
     x, v, a, j = self.parse_model(sm['modelV2'], self.v_model_error)
+
     self.mpc.update(sm['radarState'], v_cruise, x, v, a, j, personality=self.personality)
 
     self.v_desired_trajectory_full = np.interp(ModelConstants.T_IDXS, T_IDXS_MPC, self.mpc.v_solution)
@@ -151,6 +155,17 @@ class LongitudinalPlanner:
     a_prev = self.a_desired
     self.a_desired = float(interp(self.dt, ModelConstants.T_IDXS[:CONTROL_N], self.a_desired_trajectory))
     self.v_desired_filter.x = self.v_desired_filter.x + self.dt * (self.a_desired + a_prev) / 2.0
+
+    self._dbg.log({
+      "vEgo": round(v_ego, 2),
+      "aDesired": round(self.a_desired, 3),
+      "vCruise": round(v_cruise, 1),
+      "aLimLo": round(accel_limits_turns[0], 2),
+      "aLimHi": round(accel_limits_turns[1], 2),
+      "steerAng": round(sm['carState'].steeringAngleDeg, 1),
+      "standstill": sm['carState'].standstill,
+      "personality": int(self.personality),
+    })
 
   def publish(self, sm, pm):
     plan_send = messaging.new_message('longitudinalPlan')

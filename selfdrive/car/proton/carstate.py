@@ -50,6 +50,7 @@ class CarState(CarStateBase):
     self.stock_acc_cmd = 0
     self.cruise_latch = False
     self.cruise_standstill = False
+    self.distance_val = 2
 
     self.is_alc_enabled = Params().get_bool("IsAlcEnabled")
     self.cur_blinker = None
@@ -151,8 +152,8 @@ class CarState(CarStateBase):
     ret.cruiseState.available = True
 
     self.res_btn_pressed = bool(cp.vl["ACC_BUTTONS"]["RES_BUTTON"])
-    distance_val = int(cp_cam.vl["PCM_BUTTONS"]['SET_DISTANCE'])
-    self.set_long_personality(distance_val - 1)
+    self.distance_val = int(cp_cam.vl["PCM_BUTTONS"]['SET_DISTANCE'])
+    self.set_long_personality(self.distance_val - 1)
 
     self.cruise_speed = int(cp_cam.vl["PCM_BUTTONS"]['ACC_SET_SPEED']) * CV.KPH_TO_MS
     ret.cruiseState.speedCluster = self.cruise_speed

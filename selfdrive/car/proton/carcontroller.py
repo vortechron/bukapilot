@@ -6,6 +6,7 @@ from openpilot.common.numpy_fast import clip, interp
 from openpilot.common.realtime import DT_CTRL
 from openpilot.common.features import Features
 from time import monotonic
+from openpilot.common.debug_logger import DebugLogger
 
 def apply_proton_steer_torque_limits(apply_torque, apply_torque_last, driver_torque, LIMITS):
 
@@ -63,6 +64,28 @@ class CarController(CarControllerBase):
 
     self.cancel_press_cnt = 0
     self.last_cancel_press = 0
+    self._prev_accel_cmd = 0.0
+    self._dbg = DebugLogger("long_ctrl")
+
+  @staticmethod
+  def get_long_blend_params(v_ego, distance_val):
+    if distance_val == 1:
+      # City follow needs quick brake release, but gentle real throttle.
+      return (
+        interp(v_ego, [0., 22., 25., 33.], [0.08, 0.09, 0.12, 0.22]),
+        interp(v_ego, [0., 22., 25., 33.], [0.45, 0.50, 0.60, 0.75]),
+        interp(v_ego, [0., 22., 25.], [-9.0, -10.5, -13.0]),
+        -22.0,
+        interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
+      )
+
+    return (
+      interp(v_ego, [0., 22., 25., 33.], [0.09, 0.10, 0.15, 0.25]),
+      interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
+      interp(v_ego, [20., 28.], [-8., -15.]),
+      interp(v_ego, [20., 28.], [-18., -25.]),
+      interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
+    )
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -135,14 +158,55 @@ class CarController(CarControllerBase):
 
       if self.openpilot_long:
         accel_cmd = accel_cmd * 15 if accel_cmd >= 0 else accel_cmd * 18
-        if CS.out.gasPressed:
+        accel_blocked = CS.out.gasPressed or not CC.longActive
+        if accel_blocked:
           accel_cmd = 0
+          self._prev_accel_cmd = 0.0
 
         mult = interp(CS.out.vEgo, [0, 28.3], [1.0, 0.6])
-        if CS.out.vEgo < 2.5:
-          accel_cmd = (CS.stock_acc_cmd * mult + accel_cmd)/2
-        else:
-          accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
+        stock_scaled = CS.stock_acc_cmd * mult
+        accel_raw = accel_cmd
+        distance_val = getattr(CS, "distance_val", 2)
+        throttle_rate, brake_release_rate, stock_threshold, hard_override, stock_brake_rate = self.get_long_blend_params(CS.out.vEgo, distance_val)
+
+        if not accel_blocked:
+          if accel_cmd > self._prev_accel_cmd:
+            if self._prev_accel_cmd < 0.0:
+              accel_cmd = min(accel_cmd, min(0.0, self._prev_accel_cmd + brake_release_rate))
+            else:
+              accel_cmd = min(accel_cmd, self._prev_accel_cmd + throttle_rate)
+          else:
+            accel_cmd = max(accel_cmd, self._prev_accel_cmd - 0.5)
+
+          # Stock brake cap:
+          # - 1-bar/aggressive: restore earlier damping so the car does not close too deep
+          #   before stock braking is allowed to blend in.
+          # - 2/3-bar: keep the newer speed-gated blend for smoother standard/relaxed follow.
+          if stock_scaled < stock_threshold:
+            stock_brake = min(stock_scaled, accel_raw)
+            if stock_brake < hard_override:
+              accel_cmd = stock_brake
+            else:
+              accel_cmd = max(stock_brake, self._prev_accel_cmd - stock_brake_rate)
+
+          self._prev_accel_cmd = accel_cmd
+
+        self._dbg.log({
+          "vEgo": round(CS.out.vEgo, 2),
+          "aRaw": round(accel_raw, 2),
+          "aCmd": round(accel_cmd, 2),
+          "aStock": round(stock_scaled, 2),
+          "aPrev": round(self._prev_accel_cmd, 2),
+          "gap": distance_val,
+          "thrRate": round(throttle_rate, 2),
+          "relRate": round(brake_release_rate, 2),
+          "stockTh": round(stock_threshold, 2),
+          "stkBrRate": round(stock_brake_rate, 2),
+          "gas": CS.out.gasPressed,
+          "stndstl": CS.out.standstill,
+          "resume": self.resume,
+          "longAct": CC.longActive,
+        })
 
         can_sends.append(create_acc_cmd(self.packer, accel_cmd, CC.longActive, CS.out.gasPressed,
                                         standstill_request, self.resume, CS.out.brakePressed))
