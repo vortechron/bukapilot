@@ -72,20 +72,20 @@ class CarController(CarControllerBase):
     if distance_val == 1:
       # City follow needs quick brake release, but gentle real throttle.
       return (
-        interp(v_ego, [0., 22., 25., 33.], [0.08, 0.09, 0.12, 0.22]),
+        interp(v_ego, [0., 22., 25., 33.], [0.08, 0.09, 0.12, 0.16]),
         interp(v_ego, [0., 22., 25., 33.], [0.45, 0.50, 0.60, 0.75]),
-        interp(v_ego, [0., 10., 22., 25.], [-1.0, -2.0, -6.0, -8.0]),
-        interp(v_ego, [0., 10., 22., 25.], [-6.0, -8.0, -10.0, -10.0]),
-        interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
+        interp(v_ego, [0., 10., 22., 25.], [-1.0, -1.5, -2.5, -3.0]),
+        interp(v_ego, [0., 10., 22., 25.], [-4.0, -5.0, -7.0, -8.0]),
+        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.35, 0.45]),
       )
 
     if distance_val == 2:
       return (
-        interp(v_ego, [0., 22., 25., 33.], [0.09, 0.10, 0.15, 0.25]),
+        interp(v_ego, [0., 22., 25., 33.], [0.09, 0.10, 0.14, 0.18]),
         interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
-        interp(v_ego, [0., 10., 22., 28.], [-0.5, -1.5, -5.0, -8.0]),
-        interp(v_ego, [0., 10., 22., 28.], [-5.0, -7.0, -10.0, -12.0]),
-        interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
+        interp(v_ego, [0., 10., 22., 28.], [-0.5, -1.2, -2.0, -3.0]),
+        interp(v_ego, [0., 10., 22., 28.], [-4.0, -5.0, -6.5, -8.0]),
+        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.40, 0.50]),
       )
 
     return (
@@ -179,19 +179,24 @@ class CarController(CarControllerBase):
         throttle_rate, brake_release_rate, stock_threshold, hard_override, stock_brake_rate = self.get_long_blend_params(CS.out.vEgo, distance_val)
 
         if not accel_blocked:
+          if distance_val in (1, 2) and stock_scaled < stock_threshold:
+            stock_target = interp(stock_scaled, [hard_override, stock_threshold], [hard_override, 0.0])
+            accel_cmd = min(accel_raw, stock_target)
+
           if accel_cmd > self._prev_accel_cmd:
             if self._prev_accel_cmd < 0.0:
               accel_cmd = min(accel_cmd, min(0.0, self._prev_accel_cmd + brake_release_rate))
             else:
               accel_cmd = min(accel_cmd, self._prev_accel_cmd + throttle_rate)
           else:
-            accel_cmd = max(accel_cmd, self._prev_accel_cmd - 0.5)
+            rate_down = stock_brake_rate if distance_val in (1, 2) and stock_scaled < stock_threshold else 0.5
+            accel_cmd = max(accel_cmd, self._prev_accel_cmd - rate_down)
 
           # Stock brake cap:
           # - 1-bar/aggressive: restore earlier damping so the car does not close too deep
           #   before stock braking is allowed to blend in.
           # - 2/3-bar: keep the newer speed-gated blend for smoother standard/relaxed follow.
-          if stock_scaled < stock_threshold:
+          if distance_val not in (1, 2) and stock_scaled < stock_threshold:
             stock_brake = min(stock_scaled, accel_raw)
             if stock_brake < hard_override:
               accel_cmd = stock_brake
