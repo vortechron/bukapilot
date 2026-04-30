@@ -72,11 +72,31 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.40
   elif personality==log.LongitudinalPersonality.standard:
-    return 0.9
+    return 0.85
   elif personality==log.LongitudinalPersonality.aggressive:
     return 0.6
   else:
     raise NotImplementedError("Longitudinal personality not supported")
+
+def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalPersonality.standard, fallback_lead=None):
+  if personality == log.LongitudinalPersonality.relaxed:
+    return 0.0
+
+  leads = [(lead.dRel, lead.vLead) for lead in (radarstate.leadOne, radarstate.leadTwo) if lead.status]
+  if not leads and fallback_lead is not None:
+    leads.append(fallback_lead)
+  if not leads:
+    return 0.0
+
+  d_rel, v_lead = min(leads, key=lambda l: l[0])
+  closing_speed = max(v_ego - v_lead, 0.0)
+  if closing_speed < 0.5:
+    return 0.0
+
+  max_boost = 0.35 if personality == log.LongitudinalPersonality.aggressive else 0.30
+  speed_boost = np.interp(closing_speed, [0.5, 4.0], [0.0, max_boost])
+  distance_factor = np.interp(d_rel, [12.0, 60.0], [1.0, 0.0])
+  return float(speed_boost * distance_factor)
 
 def get_stopped_equivalence_factor(v_lead):
   return (v_lead**2) / (2 * COMFORT_BRAKE)
@@ -361,12 +381,15 @@ class LongitudinalMpc:
     self.max_a = max_a
 
   def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
-    t_follow = get_T_FOLLOW(personality)
     v_ego = self.x0[1]
+    base_t_follow = get_T_FOLLOW(personality)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
     lead_xv_0 = self.process_lead(radarstate.leadOne)
     lead_xv_1 = self.process_lead(radarstate.leadTwo)
+    fallback_lead = None if self.status or self._lead_gone_frames >= LEAD_PERSIST_FRAMES else (self._last_lead_x, self._last_lead_v)
+    approach_t_follow_boost = get_approach_t_follow_boost(v_ego, radarstate, personality, fallback_lead)
+    t_follow = base_t_follow + approach_t_follow_boost
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
@@ -436,6 +459,8 @@ class LongitudinalMpc:
     lead = radarstate.leadOne
     self._dbg.log({
       "tF": round(self.t_follow_actual, 3),
+      "tFBase": round(base_t_follow, 3),
+      "tFBoost": round(approach_t_follow_boost, 3),
       "dRel": round(lead.dRel, 2) if lead.status else -1,
       "vLead": round(lead.vLead, 2) if lead.status else -1,
       "aLead": round(lead.aLeadK, 2) if lead.status else -1,

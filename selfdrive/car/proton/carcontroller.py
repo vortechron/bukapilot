@@ -74,8 +74,9 @@ class CarController(CarControllerBase):
       return (
         interp(v_ego, [0., 22., 25., 33.], [0.08, 0.09, 0.12, 0.16]),
         interp(v_ego, [0., 22., 25., 33.], [0.45, 0.50, 0.60, 0.75]),
-        interp(v_ego, [0., 10., 22., 25.], [-1.0, -1.5, -2.5, -3.0]),
-        interp(v_ego, [0., 10., 22., 25.], [-4.0, -5.0, -7.0, -8.0]),
+        interp(v_ego, [0., 10., 22., 25.], [-1.0, -1.8, -3.5, -4.0]),
+        interp(v_ego, [0., 10., 22., 25.], [-3.2, -4.5, -6.0, -6.5]),
+        interp(v_ego, [0., 10., 22., 25.], [-6.0, -7.0, -9.0, -10.0]),
         interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.35, 0.45]),
       )
 
@@ -83,14 +84,16 @@ class CarController(CarControllerBase):
       return (
         interp(v_ego, [0., 22., 25., 33.], [0.09, 0.10, 0.14, 0.18]),
         interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
-        interp(v_ego, [0., 10., 22., 28.], [-0.5, -1.2, -2.0, -3.0]),
-        interp(v_ego, [0., 10., 22., 28.], [-4.0, -5.0, -6.5, -8.0]),
+        interp(v_ego, [0., 10., 22., 28.], [-0.8, -1.6, -3.5, -4.5]),
+        interp(v_ego, [0., 10., 22., 28.], [-3.0, -4.2, -6.0, -7.0]),
+        interp(v_ego, [0., 10., 22., 28.], [-5.0, -6.5, -9.0, -10.0]),
         interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.40, 0.50]),
       )
 
     return (
       interp(v_ego, [0., 22., 25., 33.], [0.09, 0.10, 0.15, 0.25]),
       interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
+      interp(v_ego, [20., 28.], [-8., -15.]),
       interp(v_ego, [20., 28.], [-8., -15.]),
       interp(v_ego, [20., 28.], [-18., -25.]),
       interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
@@ -176,11 +179,15 @@ class CarController(CarControllerBase):
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
         distance_val = getattr(CS, "distance_val", 2)
-        throttle_rate, brake_release_rate, stock_threshold, hard_override, stock_brake_rate = self.get_long_blend_params(CS.out.vEgo, distance_val)
+        throttle_rate, brake_release_rate, stock_coast_threshold, stock_brake_threshold, hard_override, stock_brake_rate = self.get_long_blend_params(CS.out.vEgo, distance_val)
 
         if not accel_blocked:
-          if distance_val in (1, 2) and stock_scaled < stock_threshold:
-            stock_target = interp(stock_scaled, [hard_override, stock_threshold], [hard_override, 0.0])
+          # For 1/2-bar, mild stock braking only blocks throttle. Stronger stock braking
+          # adds smooth brake so close-follow does not dive into a slowing lead.
+          if distance_val in (1, 2) and stock_scaled < stock_coast_threshold:
+            accel_cmd = min(accel_raw, 0.0)
+          if distance_val in (1, 2) and stock_scaled < stock_brake_threshold:
+            stock_target = interp(stock_scaled, [hard_override, stock_brake_threshold], [hard_override, 0.0])
             accel_cmd = min(accel_raw, stock_target)
 
           if accel_cmd > self._prev_accel_cmd:
@@ -189,14 +196,11 @@ class CarController(CarControllerBase):
             else:
               accel_cmd = min(accel_cmd, self._prev_accel_cmd + throttle_rate)
           else:
-            rate_down = stock_brake_rate if distance_val in (1, 2) and stock_scaled < stock_threshold else 0.5
+            rate_down = stock_brake_rate if distance_val in (1, 2) and stock_scaled < stock_brake_threshold else 0.5
             accel_cmd = max(accel_cmd, self._prev_accel_cmd - rate_down)
 
-          # Stock brake cap:
-          # - 1-bar/aggressive: restore earlier damping so the car does not close too deep
-          #   before stock braking is allowed to blend in.
-          # - 2/3-bar: keep the newer speed-gated blend for smoother standard/relaxed follow.
-          if distance_val not in (1, 2) and stock_scaled < stock_threshold:
+          # Bar 3 keeps the older stock brake cap so relaxed follow stays stable.
+          if distance_val not in (1, 2) and stock_scaled < stock_brake_threshold:
             stock_brake = min(stock_scaled, accel_raw)
             if stock_brake < hard_override:
               accel_cmd = stock_brake
@@ -214,7 +218,8 @@ class CarController(CarControllerBase):
           "gap": distance_val,
           "thrRate": round(throttle_rate, 2),
           "relRate": round(brake_release_rate, 2),
-          "stockTh": round(stock_threshold, 2),
+          "coastTh": round(stock_coast_threshold, 2),
+          "stockTh": round(stock_brake_threshold, 2),
           "stkBrRate": round(stock_brake_rate, 2),
           "gas": CS.out.gasPressed,
           "stndstl": CS.out.standstill,
