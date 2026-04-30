@@ -142,7 +142,10 @@ class CarController(CarControllerBase):
         if CS.out.vEgo < 2.5:
           accel_cmd = (CS.stock_acc_cmd * mult + accel_cmd)/2
         else:
-          accel_cmd = min(CS.stock_acc_cmd * mult, accel_cmd)
+          stock_scaled = CS.stock_acc_cmd * mult
+          distance_val = getattr(CS, "distance_val", 2)
+          if not (distance_val in (1, 2) and stock_scaled > -4.0):
+            accel_cmd = min(stock_scaled, accel_cmd)
 
         can_sends.append(create_acc_cmd(self.packer, accel_cmd, CC.longActive, CS.out.gasPressed,
                                         standstill_request, self.resume, CS.out.brakePressed))
