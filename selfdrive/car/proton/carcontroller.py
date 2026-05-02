@@ -180,13 +180,17 @@ class CarController(CarControllerBase):
         accel_raw = accel_cmd
         distance_val = getattr(CS, "distance_val", 2)
         throttle_rate, brake_release_rate, stock_coast_threshold, stock_brake_threshold, hard_override, stock_brake_rate = self.get_long_blend_params(CS.out.vEgo, distance_val)
+        urgent_stock_brake = False
 
         if not accel_blocked:
+          urgent_stock_brake = distance_val in (1, 2) and stock_scaled < hard_override
           # For 1/2-bar, mild stock braking only blocks throttle. Stronger stock braking
           # adds smooth brake so close-follow does not dive into a slowing lead.
           if distance_val in (1, 2) and stock_scaled < stock_coast_threshold:
             accel_cmd = min(accel_raw, 0.0)
-          if distance_val in (1, 2) and stock_scaled < stock_brake_threshold:
+          if urgent_stock_brake:
+            accel_cmd = min(accel_raw, stock_scaled)
+          elif distance_val in (1, 2) and stock_scaled < stock_brake_threshold:
             stock_target = interp(stock_scaled, [hard_override, stock_brake_threshold], [hard_override, 0.0])
             accel_cmd = min(accel_raw, stock_target)
 
@@ -196,7 +200,8 @@ class CarController(CarControllerBase):
             else:
               accel_cmd = min(accel_cmd, self._prev_accel_cmd + throttle_rate)
           else:
-            rate_down = stock_brake_rate if distance_val in (1, 2) and stock_scaled < stock_brake_threshold else 0.5
+            urgent_rate_down = interp(CS.out.vEgo, [0., 10., 22., 28.], [0.7, 0.9, 1.3, 1.8])
+            rate_down = urgent_rate_down if urgent_stock_brake else (stock_brake_rate if distance_val in (1, 2) and stock_scaled < stock_brake_threshold else 0.5)
             accel_cmd = max(accel_cmd, self._prev_accel_cmd - rate_down)
 
           # Bar 3 keeps the older stock brake cap so relaxed follow stays stable.
@@ -221,6 +226,7 @@ class CarController(CarControllerBase):
           "coastTh": round(stock_coast_threshold, 2),
           "stockTh": round(stock_brake_threshold, 2),
           "stkBrRate": round(stock_brake_rate, 2),
+          "urgent": urgent_stock_brake,
           "gas": CS.out.gasPressed,
           "stndstl": CS.out.standstill,
           "resume": self.resume,
