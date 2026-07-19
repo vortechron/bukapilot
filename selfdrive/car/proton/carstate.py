@@ -13,6 +13,11 @@ from enum import Enum, auto
 
 BLINKER_MIN = 2.25 # Minimum turn signal length in seconds
 
+
+def get_valid_distance_bar(distance_val, previous_distance_val):
+  return distance_val if distance_val in (1, 2, 3) else previous_distance_val
+
+
 class Dir(Enum):
   LEFT = auto()
   RIGHT = auto()
@@ -152,7 +157,8 @@ class CarState(CarStateBase):
     ret.cruiseState.available = True
 
     self.res_btn_pressed = bool(cp.vl["ACC_BUTTONS"]["RES_BUTTON"])
-    self.distance_val = int(cp_cam.vl["PCM_BUTTONS"]['SET_DISTANCE'])
+    distance_val = int(cp_cam.vl["PCM_BUTTONS"]['SET_DISTANCE'])
+    self.distance_val = get_valid_distance_bar(distance_val, self.distance_val)
     self.set_long_personality(self.distance_val - 1)
 
     self.cruise_speed = int(cp_cam.vl["PCM_BUTTONS"]['ACC_SET_SPEED']) * CV.KPH_TO_MS

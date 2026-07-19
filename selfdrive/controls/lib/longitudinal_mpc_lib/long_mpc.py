@@ -70,18 +70,15 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
 
 def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
-    return 1.40
+    return 0.75
   elif personality==log.LongitudinalPersonality.standard:
-    return 0.80
-  elif personality==log.LongitudinalPersonality.aggressive:
     return 0.50
+  elif personality==log.LongitudinalPersonality.aggressive:
+    return 0.45
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
 def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalPersonality.standard, fallback_lead=None):
-  if personality == log.LongitudinalPersonality.relaxed:
-    return 0.0
-
   leads = [(lead.dRel, lead.vLead, lead.aLeadK) for lead in (radarstate.leadOne, radarstate.leadTwo) if lead.status]
   if not leads and fallback_lead is not None:
     leads.append(fallback_lead)
@@ -94,7 +91,9 @@ def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalP
   if closing_speed < 0.3 and lead_brake < 0.4:
     return 0.0
 
-  max_boost = 0.60 if personality == log.LongitudinalPersonality.aggressive else 0.45
+  # Apply the same temporary safety margin to every selected gap so a closing
+  # lead cannot invert the driver's 1-bar < 2-bar < 3-bar choice.
+  max_boost = 0.60
   speed_boost = np.interp(closing_speed, [0.3, 3.5], [0.0, max_boost])
   brake_boost = np.interp(lead_brake, [0.4, 2.0], [0.0, max_boost * 0.45])
   distance_factor = np.interp(d_rel, [12.0, 50.0], [1.0, 0.0])
@@ -256,10 +255,10 @@ class LongitudinalMpc:
 
     # Lead persistence: remember last known lead to avoid cruise snap-back
     # when vision lead detection flickers (camera-only, no radar).
-    self._last_lead_x = 0.0
-    self._last_lead_v = 0.0
-    self._last_lead_a = 0.0
-    self._lead_gone_frames = LEAD_PERSIST_FRAMES  # start expired
+    self._last_lead_x = [0.0, 0.0]
+    self._last_lead_v = [0.0, 0.0]
+    self._last_lead_a = [0.0, 0.0]
+    self._lead_gone_frames = [LEAD_PERSIST_FRAMES, LEAD_PERSIST_FRAMES]  # start expired
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -336,7 +335,7 @@ class LongitudinalMpc:
     lead_xv = np.column_stack((x_lead_traj, v_lead_traj))
     return lead_xv
 
-  def process_lead(self, lead):
+  def process_lead(self, lead, lead_idx):
     v_ego = self.x0[1]
     if lead is not None and lead.status:
       x_lead = lead.dRel
@@ -344,21 +343,21 @@ class LongitudinalMpc:
       a_lead = lead.aLeadK
       a_lead_tau = lead.aLeadTau
       # Remember this lead for persistence
-      self._last_lead_x = x_lead
-      self._last_lead_v = v_lead
-      self._last_lead_a = a_lead
-      self._lead_gone_frames = 0
-    elif self._lead_gone_frames < LEAD_PERSIST_FRAMES:
+      self._last_lead_x[lead_idx] = x_lead
+      self._last_lead_v[lead_idx] = v_lead
+      self._last_lead_a[lead_idx] = a_lead
+      self._lead_gone_frames[lead_idx] = 0
+    elif self._lead_gone_frames[lead_idx] < LEAD_PERSIST_FRAMES:
       # Lead just dropped — use decayed last-known position.
       # Extrapolate position forward, assume lead coasts (a=0).
-      self._lead_gone_frames += 1
+      self._lead_gone_frames[lead_idx] += 1
       dt = 0.2  # MPC step
-      self._last_lead_x += self._last_lead_v * dt
-      self._last_lead_v = max(self._last_lead_v + self._last_lead_a * dt, 0.)
-      self._last_lead_a *= 0.8  # decay accel toward zero
-      x_lead = self._last_lead_x
-      v_lead = self._last_lead_v
-      a_lead = self._last_lead_a
+      self._last_lead_x[lead_idx] += self._last_lead_v[lead_idx] * dt
+      self._last_lead_v[lead_idx] = max(self._last_lead_v[lead_idx] + self._last_lead_a[lead_idx] * dt, 0.)
+      self._last_lead_a[lead_idx] *= 0.8  # decay accel toward zero
+      x_lead = self._last_lead_x[lead_idx]
+      v_lead = self._last_lead_v[lead_idx]
+      a_lead = self._last_lead_a[lead_idx]
       a_lead_tau = _LEAD_ACCEL_TAU
     else:
       # Fake a fast lead car, so mpc can keep running in the same mode
@@ -387,9 +386,13 @@ class LongitudinalMpc:
     base_t_follow = get_T_FOLLOW(personality)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
-    lead_xv_0 = self.process_lead(radarstate.leadOne)
-    lead_xv_1 = self.process_lead(radarstate.leadTwo)
-    fallback_lead = None if self.status or self._lead_gone_frames >= LEAD_PERSIST_FRAMES else (self._last_lead_x, self._last_lead_v, self._last_lead_a)
+    lead_xv_0 = self.process_lead(radarstate.leadOne, 0)
+    lead_xv_1 = self.process_lead(radarstate.leadTwo, 1)
+    persisted_leads = [
+      (self._last_lead_x[i], self._last_lead_v[i], self._last_lead_a[i])
+      for i in range(2) if self._lead_gone_frames[i] < LEAD_PERSIST_FRAMES
+    ]
+    fallback_lead = None if self.status or not persisted_leads else min(persisted_leads, key=lambda lead: lead[0])
     approach_t_follow_boost = get_approach_t_follow_boost(v_ego, radarstate, personality, fallback_lead)
     t_follow = base_t_follow + approach_t_follow_boost
 
