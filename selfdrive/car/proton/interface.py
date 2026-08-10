@@ -44,6 +44,8 @@ class CarInterface(CarInterfaceBase):
     ret.openpilotLongitudinalControl = True
     ret.wheelSpeedFactor = 1.02
 
+    uses_s70_platform = candidate == CAR.S70
+
     if candidate == CAR.X50:
       ret.lateralParams.torqueBP, ret.lateralParams.torqueV = [[0.], [545]]
       ret.longitudinalTuning.kpV = [0.5, 0.4, 0.3]
@@ -60,12 +62,12 @@ class CarInterface(CarInterfaceBase):
       ret.safetyModel = car.CarParams.SafetyModel.noOutput
 
 
-    ret.stopAccel = -1.0
+    ret.stopAccel = -1.0 if uses_s70_platform else -0.8
     ret.startingState = True
     ret.startAccel = 1.2
     ret.minEnableSpeed = -1
     ret.enableBsm = True
-    ret.stoppingDecelRate = 0.4 # reach stopping target smoothly
+    ret.stoppingDecelRate = 0.4 if uses_s70_platform else 0.3 # reach stopping target smoothly
 
     return ret
 

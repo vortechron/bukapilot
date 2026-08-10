@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
+from enum import IntEnum
 import os
 import time
 import numpy as np
 from cereal import log
 from openpilot.common.numpy_fast import clip
+from openpilot.common.realtime import DT_MDL
 from openpilot.common.swaglog import cloudlog
 from openpilot.common.debug_logger import DebugLogger
 # WARNING: imports outside of constants will not trigger a rebuild
@@ -55,9 +57,30 @@ T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
-# Dominates the gap at low speed, so this is the lever for jam closeness.
-# T_FOLLOW barely moves a standstill or crawling gap.
-STOP_DISTANCE = 4.0
+# This value is embedded in the generated solver. Per-profile stop distances
+# are applied as an obstacle offset so Python and the generated C stay aligned.
+STOP_DISTANCE = 5.5
+
+
+class LongitudinalFollowProfile(IntEnum):
+  default = 0
+  proton_x50_fl = 1
+
+
+PROTON_X50_FL_FINGERPRINT = "PROTON S70"
+PROTON_X50_FL_ONE_BAR_T_FOLLOW = 0.28
+PROTON_X50_FL_ONE_BAR_STOP_DISTANCE = 2.5
+
+
+def get_follow_profile(car_name, car_fingerprint):
+  if car_name == "proton" and car_fingerprint == PROTON_X50_FL_FINGERPRINT:
+    return LongitudinalFollowProfile.proton_x50_fl
+  return LongitudinalFollowProfile.default
+
+
+def is_x50_fl_one_bar(personality, follow_profile):
+  return follow_profile == LongitudinalFollowProfile.proton_x50_fl and personality == log.LongitudinalPersonality.aggressive
+
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -70,17 +93,35 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
     raise NotImplementedError("Longitudinal personality not supported")
 
 
-def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
+def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, follow_profile=LongitudinalFollowProfile.default):
+  if is_x50_fl_one_bar(personality, follow_profile):
+    return PROTON_X50_FL_ONE_BAR_T_FOLLOW
   if personality==log.LongitudinalPersonality.relaxed:
-    return 0.75
+    return 1.40
   elif personality==log.LongitudinalPersonality.standard:
-    return 0.46
+    return 1.25
   elif personality==log.LongitudinalPersonality.aggressive:
-    return 0.45
+    return 1.20
   else:
     raise NotImplementedError("Longitudinal personality not supported")
 
-def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalPersonality.standard, fallback_lead=None):
+
+def get_stop_distance(personality=log.LongitudinalPersonality.standard, follow_profile=LongitudinalFollowProfile.default):
+  if is_x50_fl_one_bar(personality, follow_profile):
+    return PROTON_X50_FL_ONE_BAR_STOP_DISTANCE
+  return STOP_DISTANCE
+
+
+def get_lead_obstacle_offset(personality=log.LongitudinalPersonality.standard,
+                             follow_profile=LongitudinalFollowProfile.default):
+  return STOP_DISTANCE - get_stop_distance(personality, follow_profile)
+
+
+def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalPersonality.standard,
+                                follow_profile=LongitudinalFollowProfile.default, fallback_lead=None):
+  if not is_x50_fl_one_bar(personality, follow_profile):
+    return 0.0
+
   leads = [(lead.dRel, lead.vLead, lead.aLeadK) for lead in (radarstate.leadOne, radarstate.leadTwo) if lead.status]
   if not leads and fallback_lead is not None:
     leads.append(fallback_lead)
@@ -93,12 +134,9 @@ def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalP
   if closing_speed < 0.3 and lead_brake < 0.4:
     return 0.0
 
-  # Keep enough temporary closing-speed margin to pass the hard-braking
-  # maneuver, while letting the two closer settings catch up slightly sooner.
-  if personality in (log.LongitudinalPersonality.aggressive, log.LongitudinalPersonality.standard):
-    max_boost = 0.58
-  else:
-    max_boost = 0.60
+  # One bar is deliberately close at steady speed. Preserve a temporary margin
+  # only while closing or while the lead is braking.
+  max_boost = 0.58
   speed_boost = np.interp(closing_speed, [0.3, 3.5], [0.0, max_boost])
   brake_boost = np.interp(lead_brake, [0.4, 2.0], [0.0, max_boost * 0.45])
   distance_factor = np.interp(d_rel, [12.0, 50.0], [1.0, 0.0])
@@ -107,13 +145,13 @@ def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalP
 def get_stopped_equivalence_factor(v_lead):
   return (v_lead**2) / (2 * COMFORT_BRAKE)
 
-def get_safe_obstacle_distance(v_ego, t_follow):
-  return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + STOP_DISTANCE
+def get_safe_obstacle_distance(v_ego, t_follow, stop_distance=STOP_DISTANCE):
+  return (v_ego**2) / (2 * COMFORT_BRAKE) + t_follow * v_ego + stop_distance
 
-def desired_follow_distance(v_ego, v_lead, t_follow=None):
+def desired_follow_distance(v_ego, v_lead, t_follow=None, stop_distance=STOP_DISTANCE):
   if t_follow is None:
     t_follow = get_T_FOLLOW()
-  return get_safe_obstacle_distance(v_ego, t_follow) - get_stopped_equivalence_factor(v_lead)
+  return get_safe_obstacle_distance(v_ego, t_follow, stop_distance) - get_stopped_equivalence_factor(v_lead)
 
 
 def gen_long_model():
@@ -246,24 +284,29 @@ def gen_long_ocp():
   return ocp
 
 
-LEAD_PERSIST_FRAMES = 15  # keep ghost lead for ~3s at 5Hz MPC rate
+LEAD_PERSIST_SECONDS = 3.0
+LEAD_PERSIST_FRAMES = round(LEAD_PERSIST_SECONDS / DT_MDL)
+
+
+def project_missing_lead(d_rel, v_lead, a_lead, v_ego, a_ego):
+  lead_v_next = max(v_lead + a_lead * DT_MDL, 0.0)
+  ego_v_next = max(v_ego + a_ego * DT_MDL, 0.0)
+  relative_speed_now = v_lead - v_ego
+  relative_speed_next = lead_v_next - ego_v_next
+  d_rel += (relative_speed_now + relative_speed_next) * 0.5 * DT_MDL
+  return d_rel, lead_v_next, a_lead * 0.8
 
 
 class LongitudinalMpc:
-  def __init__(self, mode='acc'):
+  def __init__(self, mode='acc', follow_profile=LongitudinalFollowProfile.default):
     self.mode = mode
+    self.follow_profile = LongitudinalFollowProfile(follow_profile)
+    self._lead_persist_frames = LEAD_PERSIST_FRAMES if self.follow_profile == LongitudinalFollowProfile.proton_x50_fl else 0
     self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
     self.reset()
     self.source = SOURCES[2]
-    self.t_follow_actual = get_T_FOLLOW()
+    self.t_follow_actual = get_T_FOLLOW(follow_profile=self.follow_profile)
     self._dbg = DebugLogger("long_mpc")
-
-    # Lead persistence: remember last known lead to avoid cruise snap-back
-    # when vision lead detection flickers (camera-only, no radar).
-    self._last_lead_x = [0.0, 0.0]
-    self._last_lead_v = [0.0, 0.0]
-    self._last_lead_a = [0.0, 0.0]
-    self._lead_gone_frames = [LEAD_PERSIST_FRAMES, LEAD_PERSIST_FRAMES]  # start expired
 
   def reset(self):
     # self.solver = AcadosOcpSolverCython(MODEL_NAME, ACADOS_SOLVER_TYPE, N)
@@ -286,6 +329,12 @@ class LongitudinalMpc:
     self.status = False
     self.crash_cnt = 0.0
     self.solution_status = 0
+    # X50 FL is camera-only. Keep each lead slot independently across short
+    # detection gaps, and expire both slots on an MPC reset.
+    self._last_lead_x = [0.0, 0.0]
+    self._last_lead_v = [0.0, 0.0]
+    self._last_lead_a = [0.0, 0.0]
+    self._lead_gone_frames = [self._lead_persist_frames, self._lead_persist_frames]
     # timers
     self.solve_time = 0.0
     self.time_qp_solution = 0.0
@@ -352,14 +401,14 @@ class LongitudinalMpc:
       self._last_lead_v[lead_idx] = v_lead
       self._last_lead_a[lead_idx] = a_lead
       self._lead_gone_frames[lead_idx] = 0
-    elif self._lead_gone_frames[lead_idx] < LEAD_PERSIST_FRAMES:
-      # Lead just dropped — use decayed last-known position.
-      # Extrapolate position forward, assume lead coasts (a=0).
+    elif self._lead_gone_frames[lead_idx] < self._lead_persist_frames:
+      # dRel is relative to ego, so advance it with relative speed at the real
+      # 20 Hz planner interval. Advancing by absolute lead speed makes the ghost
+      # incorrectly run away when both cars are moving.
       self._lead_gone_frames[lead_idx] += 1
-      dt = 0.2  # MPC step
-      self._last_lead_x[lead_idx] += self._last_lead_v[lead_idx] * dt
-      self._last_lead_v[lead_idx] = max(self._last_lead_v[lead_idx] + self._last_lead_a[lead_idx] * dt, 0.)
-      self._last_lead_a[lead_idx] *= 0.8  # decay accel toward zero
+      self._last_lead_x[lead_idx], self._last_lead_v[lead_idx], self._last_lead_a[lead_idx] = project_missing_lead(
+        self._last_lead_x[lead_idx], self._last_lead_v[lead_idx], self._last_lead_a[lead_idx], v_ego, self.x0[2],
+      )
       x_lead = self._last_lead_x[lead_idx]
       v_lead = self._last_lead_v[lead_idx]
       a_lead = self._last_lead_a[lead_idx]
@@ -388,24 +437,29 @@ class LongitudinalMpc:
 
   def update(self, radarstate, v_cruise, x, v, a, j, personality=log.LongitudinalPersonality.standard):
     v_ego = self.x0[1]
-    base_t_follow = get_T_FOLLOW(personality)
+    base_t_follow = get_T_FOLLOW(personality, self.follow_profile)
+    stop_distance = get_stop_distance(personality, self.follow_profile)
     self.status = radarstate.leadOne.status or radarstate.leadTwo.status
 
     lead_xv_0 = self.process_lead(radarstate.leadOne, 0)
     lead_xv_1 = self.process_lead(radarstate.leadTwo, 1)
     persisted_leads = [
       (self._last_lead_x[i], self._last_lead_v[i], self._last_lead_a[i])
-      for i in range(2) if self._lead_gone_frames[i] < LEAD_PERSIST_FRAMES
+      for i in range(2) if self._lead_gone_frames[i] < self._lead_persist_frames
     ]
     fallback_lead = None if self.status or not persisted_leads else min(persisted_leads, key=lambda lead: lead[0])
-    approach_t_follow_boost = get_approach_t_follow_boost(v_ego, radarstate, personality, fallback_lead)
+    approach_t_follow_boost = get_approach_t_follow_boost(v_ego, radarstate, personality, self.follow_profile, fallback_lead)
     t_follow = base_t_follow + approach_t_follow_boost
 
     # To estimate a safe distance from a moving lead, we calculate how much stopping
     # distance that lead needs as a minimum. We can add that to the current distance
     # and then treat that as a stopped car/obstacle at this new distance.
-    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1])
-    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1])
+    # The generated solver embeds STOP_DISTANCE. Shift only the selected
+    # profile's lead obstacles so its effective stop distance can differ without
+    # letting Python constants drift from generated C again.
+    lead_obstacle_offset = get_lead_obstacle_offset(personality, self.follow_profile)
+    lead_0_obstacle = lead_xv_0[:,0] + get_stopped_equivalence_factor(lead_xv_0[:,1]) + lead_obstacle_offset
+    lead_1_obstacle = lead_xv_1[:,0] + get_stopped_equivalence_factor(lead_xv_1[:,1]) + lead_obstacle_offset
 
     self.params[:,0] = ACCEL_MIN
     self.params[:,1] = self.max_a
@@ -471,6 +525,8 @@ class LongitudinalMpc:
       "tF": round(self.t_follow_actual, 3),
       "tFBase": round(base_t_follow, 3),
       "tFBoost": round(approach_t_follow_boost, 3),
+      "stopD": round(stop_distance, 2),
+      "profile": int(self.follow_profile),
       "dRel": round(lead.dRel, 2) if lead.status else -1,
       "vLead": round(lead.vLead, 2) if lead.status else -1,
       "aLead": round(lead.aLeadK, 2) if lead.status else -1,

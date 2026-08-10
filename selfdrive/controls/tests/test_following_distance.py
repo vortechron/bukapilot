@@ -2,15 +2,19 @@
 import itertools
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 from parameterized import parameterized_class
 
 from openpilot.common.params import Params
+from openpilot.common.realtime import DT_MDL
 from cereal import log
 
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LEAD_PERSIST_FRAMES, LongitudinalMpc, desired_follow_distance, \
-                                                                    get_approach_t_follow_boost, get_T_FOLLOW
+from openpilot.selfdrive.controls.lib import longitudinal_planner as longitudinal_planner_module
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LEAD_PERSIST_FRAMES, LongitudinalFollowProfile, LongitudinalMpc, \
+                                                                    desired_follow_distance, get_approach_t_follow_boost, get_follow_profile, \
+                                                                    get_lead_obstacle_offset, get_stop_distance, get_T_FOLLOW, project_missing_lead
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
 
 
@@ -36,32 +40,56 @@ class TestFollowGapTuning(unittest.TestCase):
     2: log.LongitudinalPersonality.standard,
     3: log.LongitudinalPersonality.relaxed,
   }
+  FOLLOW_PROFILE = LongitudinalFollowProfile.proton_x50_fl
 
   def test_bar_follow_times(self):
+    follow_times = {bar: get_T_FOLLOW(personality, self.FOLLOW_PROFILE) for bar, personality in self.BAR_PERSONALITIES.items()}
+
+    self.assertEqual(follow_times, {1: 0.28, 2: 1.25, 3: 1.40})
+
+  def test_default_follow_times_remain_unchanged(self):
     follow_times = {bar: get_T_FOLLOW(personality) for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    # One bar stays at the lowest high-speed value that passes the planner
-    # simulation. Two bar moves almost to the same steady target, while its
-    # small base step keeps it more conservative.
-    self.assertEqual(follow_times, {1: 0.45, 2: 0.46, 3: 0.75})
+    self.assertEqual(follow_times, {1: 1.20, 2: 1.25, 3: 1.40})
 
   def test_bar_gap_steps_at_90_kph(self):
     v_ego = v_lead = 25.0
-    gaps = [desired_follow_distance(v_ego, v_lead, get_T_FOLLOW(personality)) for personality in self.BAR_PERSONALITIES.values()]
+    gaps = [desired_follow_distance(v_ego, v_lead, get_T_FOLLOW(personality, self.FOLLOW_PROFILE),
+                                    get_stop_distance(personality, self.FOLLOW_PROFILE))
+            for personality in self.BAR_PERSONALITIES.values()]
 
-    self.assertGreaterEqual(gaps[0], 15.25)
-    self.assertAlmostEqual(gaps[1] - gaps[0], 0.25)
-    self.assertAlmostEqual(gaps[2] - gaps[1], 7.25)
+    self.assertEqual(gaps, [9.5, 36.75, 40.5])
+    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.aggressive, self.FOLLOW_PROFILE), 3.0)
+    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.standard, self.FOLLOW_PROFILE), 0.0)
 
-  def test_approach_boost_caps_keep_close_bars_closer(self):
+  def test_one_bar_matches_requested_physical_gap_ranges(self):
+    personality = log.LongitudinalPersonality.aggressive
+    t_follow = get_T_FOLLOW(personality, self.FOLLOW_PROFILE)
+    stop_distance = get_stop_distance(personality, self.FOLLOW_PROFILE)
+
+    jam_gap = desired_follow_distance(0.0, 0.0, t_follow, stop_distance)
+    city_speed = 50.0 / 3.6
+    city_gap = desired_follow_distance(city_speed, city_speed, t_follow, stop_distance)
+    highway_speed = 100.0 / 3.6
+    highway_gap = desired_follow_distance(highway_speed, highway_speed, t_follow, stop_distance)
+
+    self.assertGreaterEqual(jam_gap, 2.25)
+    self.assertLessEqual(jam_gap, 2.75)
+    self.assertGreaterEqual(city_gap, 6.0)
+    self.assertLessEqual(city_gap, 7.0)
+    self.assertGreaterEqual(highway_gap, 9.0)
+    self.assertLessEqual(highway_gap, 11.0)
+
+  def test_approach_boost_is_limited_to_custom_one_bar(self):
     radarstate = SimpleNamespace(
       leadOne=SimpleNamespace(status=True, dRel=12.0, vLead=15.0, aLeadK=-3.0),
       leadTwo=SimpleNamespace(status=False),
     )
 
-    boosts = {bar: get_approach_t_follow_boost(25.0, radarstate, personality) for bar, personality in self.BAR_PERSONALITIES.items()}
+    boosts = {bar: get_approach_t_follow_boost(25.0, radarstate, personality, self.FOLLOW_PROFILE)
+              for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    self.assertEqual(boosts, {1: 0.58, 2: 0.58, 3: 0.60})
+    self.assertEqual(boosts, {1: 0.58, 2: 0.0, 3: 0.0})
 
   def test_approach_boost_preserves_bar_order(self):
     scenarios = [
@@ -79,7 +107,8 @@ class TestFollowGapTuning(unittest.TestCase):
         )
         actual_follow_times = []
         for personality in self.BAR_PERSONALITIES.values():
-          actual_follow_times.append(get_T_FOLLOW(personality) + get_approach_t_follow_boost(v_ego, radarstate, personality))
+          actual_follow_times.append(get_T_FOLLOW(personality, self.FOLLOW_PROFILE) +
+                                     get_approach_t_follow_boost(v_ego, radarstate, personality, self.FOLLOW_PROFILE))
 
         self.assertLess(actual_follow_times[0], actual_follow_times[1])
         self.assertLess(actual_follow_times[1], actual_follow_times[2])
@@ -87,6 +116,7 @@ class TestFollowGapTuning(unittest.TestCase):
   def test_lead_persistence_is_isolated_per_slot(self):
     mpc = LongitudinalMpc.__new__(LongitudinalMpc)
     mpc.x0 = np.array([0.0, 20.0, 0.0])
+    mpc._lead_persist_frames = LEAD_PERSIST_FRAMES
     mpc._last_lead_x = [0.0, 0.0]
     mpc._last_lead_v = [0.0, 0.0]
     mpc._last_lead_a = [0.0, 0.0]
@@ -103,6 +133,56 @@ class TestFollowGapTuning(unittest.TestCase):
     persisted_trajectory = mpc.process_lead(missing_lead, 0)
     self.assertLess(persisted_trajectory[0, 0], 50.0)
     self.assertEqual(mpc._lead_gone_frames, [1, LEAD_PERSIST_FRAMES])
+
+  def test_lead_persistence_uses_real_planner_time_and_relative_motion(self):
+    self.assertEqual(LEAD_PERSIST_FRAMES, round(3.0 / DT_MDL))
+
+    d_rel, v_lead, a_lead = project_missing_lead(30.0, 20.0, 0.0, 20.0, 0.0)
+    self.assertAlmostEqual(d_rel, 30.0)
+    self.assertAlmostEqual(v_lead, 20.0)
+    self.assertAlmostEqual(a_lead, 0.0)
+
+    closing_d_rel, _, _ = project_missing_lead(30.0, 10.0, 0.0, 20.0, 0.0)
+    self.assertAlmostEqual(closing_d_rel, 29.5)
+
+    mpc = LongitudinalMpc.__new__(LongitudinalMpc)
+    mpc.x0 = np.array([0.0, 20.0, 0.0])
+    mpc._lead_persist_frames = LEAD_PERSIST_FRAMES
+    mpc._last_lead_x = [0.0, 0.0]
+    mpc._last_lead_v = [0.0, 0.0]
+    mpc._last_lead_a = [0.0, 0.0]
+    mpc._lead_gone_frames = [LEAD_PERSIST_FRAMES, LEAD_PERSIST_FRAMES]
+
+    live_lead = SimpleNamespace(status=True, dRel=30.0, vLead=20.0, aLeadK=0.0, aLeadTau=1.5)
+    missing_lead = SimpleNamespace(status=False)
+    mpc.process_lead(live_lead, 0)
+    for _ in range(LEAD_PERSIST_FRAMES):
+      trajectory = mpc.process_lead(missing_lead, 0)
+
+    self.assertAlmostEqual(trajectory[0, 0], 30.0)
+    self.assertEqual(mpc._lead_gone_frames[0], LEAD_PERSIST_FRAMES)
+    self.assertGreaterEqual(mpc.process_lead(missing_lead, 0)[0, 0], 50.0)
+
+  def test_follow_profile_is_x50_fl_only(self):
+    self.assertEqual(get_follow_profile("proton", "PROTON S70"), LongitudinalFollowProfile.proton_x50_fl)
+    self.assertEqual(get_follow_profile("proton", "PROTON X50"), LongitudinalFollowProfile.default)
+    self.assertEqual(get_follow_profile("honda", "HONDA CIVIC 2016"), LongitudinalFollowProfile.default)
+
+  def test_planner_passes_selected_vehicle_profile_to_mpc(self):
+    params = SimpleNamespace(get=lambda _: str(log.LongitudinalPersonality.standard))
+    x50_fl_cp = SimpleNamespace(carName="proton", carFingerprint="PROTON S70")
+    other_cp = SimpleNamespace(carName="proton", carFingerprint="PROTON X50")
+
+    with patch.object(longitudinal_planner_module, "Params", return_value=params), \
+         patch.object(longitudinal_planner_module, "LongitudinalMpc") as mpc_class:
+      x50_fl_planner = longitudinal_planner_module.LongitudinalPlanner(x50_fl_cp)
+      mpc_class.assert_called_once_with(follow_profile=LongitudinalFollowProfile.proton_x50_fl)
+      self.assertEqual(x50_fl_planner.follow_profile, LongitudinalFollowProfile.proton_x50_fl)
+
+      mpc_class.reset_mock()
+      other_planner = longitudinal_planner_module.LongitudinalPlanner(other_cp)
+      mpc_class.assert_called_once_with(follow_profile=LongitudinalFollowProfile.default)
+      self.assertEqual(other_planner.follow_profile, LongitudinalFollowProfile.default)
 
 
 @parameterized_class(("e2e", "personality", "speed"), itertools.product(

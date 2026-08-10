@@ -344,7 +344,7 @@ journalctl -f
 ## Longitudinal Control Pipeline
 
 ```
-modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
+modeld (20Hz) → radarState (leads) → longitudinal_planner.py (20Hz)
                                               │
                                          MPC solver (long_mpc.py)
                                               │
@@ -356,9 +356,9 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
                                               │
                                     carcontroller.py (50Hz)
                                      ├── scale: ×15 throttle / ×18 brake
-                                     ├── rate limit: +0.2/-0.5 per frame (damps MPC oscillation)
-                                     ├── stock brake cap: min(stock, OP) when stock < 0
-                                     └── throttle: uncapped (close following)
+                                     ├── 1-bar speed-based throttle/brake rate limits
+                                     ├── 1 bar: custom close-follow stock blend
+                                     └── 2/3 bar: original release stock blend
                                               │
                                     protoncan.create_acc_cmd() → CAN bus
 ```
@@ -374,53 +374,60 @@ modeld (10Hz) → radarState (leads) → longitudinal_planner.py (10Hz)
 | 144 km/h | 0.6 | -1.2 |
 
 **Follow Distance** (`long_mpc.py`):
-| Personality | T_FOLLOW | Gap at 90 km/h |
-|------------|----------|----------------|
-| Aggressive | 0.6s | ~19m |
-| Standard | 0.8s | ~24m |
-| Relaxed | 1.40s | ~39m |
+| X50 FL / S70 bar | Personality | T_FOLLOW | Effective stop gap | Gap at 90 km/h |
+|------------------|-------------|----------|--------------------|----------------|
+| 1 | Aggressive | 0.28s | 2.5m | 9.5m |
+| 2 | Standard | 1.25s | 5.5m | 36.75m |
+| 3 | Relaxed | 1.40s | 5.5m | 40.5m |
+
+Other platforms retain the stable 1.20s / 1.25s / 1.40s personality values and the 5.5m stop gap.
 
 **MPC Constants** (`long_mpc.py`):
 | Param | Value | Effect |
 |-------|-------|--------|
-| `STOP_DISTANCE` | 4.0m | Buffer behind stopped lead |
+| `STOP_DISTANCE` | 5.5m | Generated-solver baseline; 1 bar uses a scoped 3.0m obstacle offset for an effective 2.5m gap |
 | `COMFORT_BRAKE` | 2.5 m/s² | Comfortable decel for gap calc |
 | `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
-| `LEAD_PERSIST_FRAMES` | 15 | Ghost lead for ~3s on camera flicker |
+| `LEAD_PERSIST_FRAMES` | 60 | X50 FL ghost lead for 3s at the 20Hz planner rate |
 
 **Rate Limiter** (`carcontroller.py`):
 | Direction | Per frame (50Hz) | Per second |
 |-----------|-----------------|-----------|
-| Throttle | +0.15 CAN units (≤108 km/h), +0.25 (119+ km/h) | +7.5/s / +12.5/s |
-| Brake | -0.5 CAN units | -25/s |
+| Throttle | +0.25 at 0 m/s to +0.40 at 33 m/s | +12.5/s to +20/s |
+| Ordinary brake | -0.5 CAN units | -25/s |
+| 1-bar stock brake blend | -0.45 to -0.85; urgent is immediate | Speed-dependent |
 
 **Stock Blending** (`carcontroller.py`):
-- Throttle: uncapped — OP can close to T_FOLLOW=0.8s (stock follows at ~1.5s)
-- Braking: `min(stock_scaled, accel_cmd)` when stock < -15 CAN — ignores gap-maintenance braking
+- X50 FL / S70 1 bar: mild stock gap-nagging does not suppress throttle; real braking blends below a speed-dependent -8 to -14 CAN threshold.
+- X50 FL / S70 1 bar: urgent stock braking passes through immediately at the speed-dependent -16 to -22 CAN hard override.
+- Bars 2/3 and other Proton platforms retain the original low-speed average and road-speed stock cap.
+- Stop-and-go automatic RES delay is 0.5s for X50 FL / S70 1 bar and 3.1s otherwise.
 
-**Stopping** (`interface.py`):
-| Param | Value | Original |
-|-------|-------|----------|
-| `stopAccel` | -1.0 m/s² | -0.8 |
+**X50 FL / S70 stopping** (`interface.py`):
+| Param | X50 FL / S70 | Other Proton platforms |
+|-------|---------------|------------------------|
+| `stopAccel` | -1.0 m/s² | -0.8 m/s² |
 | `stoppingDecelRate` | 0.4 | 0.3 |
-| `startAccel` | 1.2 m/s² | 1.2 |
+| `startAccel` | 1.2 m/s² | 1.2 m/s² |
 
 **Stock ACC Blending** (`carcontroller.py`):
 ```python
 mult = interp(vEgo, [0, 28.3], [1.0, 0.6])  # scale down at speed
 stock_scaled = stock_acc_cmd × mult
-if stock_scaled < -15:                          # ignore gap-maintenance braking
-    accel_cmd = min(stock_scaled, accel_cmd)    # only follow real braking
+if x50_fl_one_bar and stock_scaled <= hard_override:
+    accel_cmd = min(stock_scaled, accel_cmd)    # immediate urgent stock brake
+elif not x50_fl_one_bar:
+    accel_cmd = original_release_blend(stock_scaled, accel_cmd)
 ```
 
-### Branch Objectives (`release_ka2_amirul`)
+### Branch Objectives (`release_ka2_x50_fl`)
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | Close follow distance | ⚠️ T_FOLLOW std=0.8s/agg=0.6s, stock cap -15 CAN (ignore gap maint), needs testing |
-| 2 | Fix creep in jams | ✅ Brake-only stock cap + lead persistence |
-| 3 | Fix incomplete stop | ✅ stopAccel=-1.0, lead persistence |
-| 4 | Fix slow accel from stop | ⚠️ Rate limiter +0.15 (slightly faster), needs testing |
+| 1 | One-bar-only close follow | ✅ 0.28s + effective 2.5m stop gap; device validation pending |
+| 2 | Keep bars 2/3 far | ✅ Restored stable 1.25s / 1.40s targets |
+| 3 | Responsive traffic-jam resume | ✅ 0.5s one-bar automatic RES; device validation pending |
+| 4 | Stable camera lead | ✅ Relative-motion persistence for 60 frames / 3s; replay validation pending |
 | 5 | Curve speed | ❌ Removed by user request |
 
 ### Tuning Lessons
@@ -428,13 +435,13 @@ if stock_scaled < -15:                          # ignore gap-maintenance braking
 1. **Rate limiter > accel ceiling** for comfort — don't lower A_CRUISE_MAX, use rate limiter
 2. **Change one parameter per test** — T_FOLLOW + accel + rate limiter are coupled
 3. **Add instrumentation first** — debug logger should be commit 1, not commit 4
-4. **Stock ACC cap always** — `min(stock, OP)` is the right safety layer
-5. **Camera-only needs lead persistence** — X50 FL drops lead 67% of frames
-6. **Asymmetric rates** — slow throttle (+0.2), fast brake (-0.5) matches human expectations
-7. **Don't boost t_follow** — stopped-lead boost made follow distance feel far; trust T_FOLLOW=0.8s as-is
-8. **Stock cap blocks close following** — `min(stock, OP)` for throttle prevents OP from closing to T_FOLLOW=0.8s because stock follows at ~1.5s. Only cap braking.
-9. **Rate limiter damps MPC oscillation** — without rate limiter, car hunts (throttle-brake-throttle). MPC jerk cost alone isn't enough. Rate limiter + brake-only stock cap = gentle + close.
-10. **User values gentleness over speed** — "fine if slow to accel, as long as gentle and close"
+4. **Keep a stock brake safety layer** — ignore only mild one-bar gap nagging; blend real braking and retain the hard override
+5. **Camera-only needs correctly timed lead persistence** — use relative motion and the real 20Hz planner interval
+6. **Asymmetric rates** — bounded throttle and faster braking match human expectations
+7. **Boost only while approaching** — steady one-bar stays close; closing speed or lead braking temporarily adds margin
+8. **One bar is the only custom mode** — bars 2/3 and non-X50-FL profiles keep stable targets and stock blending
+9. **One-bar rate limiting damps MPC oscillation** — bounded ordinary commands prevent hunting, while urgent stock braking bypasses the limiter
+10. **User wants one bar close and responsive** — traffic-jam and moving follow use the same isolated custom profile
 
 ## Project Structure (Key Directories)
 ```

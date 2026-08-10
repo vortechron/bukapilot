@@ -12,7 +12,7 @@ from openpilot.common.realtime import DT_MDL
 from openpilot.selfdrive.modeld.constants import ModelConstants
 from openpilot.selfdrive.car.interfaces import ACCEL_MIN, ACCEL_MAX
 from openpilot.selfdrive.controls.lib.longcontrol import LongCtrlState
-from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalMpc
+from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LongitudinalFollowProfile, LongitudinalMpc, get_follow_profile
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import T_IDXS as T_IDXS_MPC
 from openpilot.selfdrive.controls.lib.drive_helpers import V_CRUISE_MAX, CONTROL_N, get_speed_error
 from openpilot.common.swaglog import cloudlog
@@ -49,9 +49,10 @@ def limit_accel_in_turns(v_ego, angle_steers, a_target, CP):
 
 
 class LongitudinalPlanner:
-  def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL):
+  def __init__(self, CP, init_v=0.0, init_a=0.0, dt=DT_MDL, follow_profile=None):
     self.CP = CP
-    self.mpc = LongitudinalMpc()
+    self.follow_profile = get_follow_profile(CP.carName, CP.carFingerprint) if follow_profile is None else LongitudinalFollowProfile(follow_profile)
+    self.mpc = LongitudinalMpc(follow_profile=self.follow_profile)
     self.fcw = False
     self.dt = dt
 
@@ -165,6 +166,7 @@ class LongitudinalPlanner:
       "steerAng": round(sm['carState'].steeringAngleDeg, 1),
       "standstill": sm['carState'].standstill,
       "personality": int(self.personality),
+      "profile": int(self.follow_profile),
     })
 
   def publish(self, sm, pm):

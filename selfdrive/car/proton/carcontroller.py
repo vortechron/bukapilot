@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car.interfaces import CarControllerBase
 from openpilot.selfdrive.car.proton.protoncan import create_can_steer_command, send_buttons, create_acc_cmd
@@ -7,6 +8,25 @@ from openpilot.common.realtime import DT_CTRL
 from openpilot.common.features import Features
 from time import monotonic
 from openpilot.common.debug_logger import DebugLogger
+
+
+SNG_DEFAULT_RESUME_DELAY_S = 3.1
+SNG_CLOSE_FOLLOW_RESUME_DELAY_S = 0.5
+
+
+@dataclass(frozen=True)
+class LongBlendParams:
+  throttle_rate: float
+  brake_release_rate: float
+  stock_brake_threshold: float
+  hard_override: float
+  stock_brake_rate: float
+
+
+def get_sng_resume_delay_frames(distance_val, close_follow_enabled):
+  delay_s = SNG_CLOSE_FOLLOW_RESUME_DELAY_S if close_follow_enabled and distance_val == 1 else SNG_DEFAULT_RESUME_DELAY_S
+  return round(delay_s / DT_CTRL)
+
 
 def apply_proton_steer_torque_limits(apply_torque, apply_torque_last, driver_torque, LIMITS):
 
@@ -53,6 +73,7 @@ class CarController(CarControllerBase):
     f = Features()
     self.always_lks_tactile = f.has("lks-tactile")
     self.openpilot_long = not f.has("stock-acc")
+    self.close_follow_enabled = CP.carFingerprint == CAR.S70
 
     self.prev_steer_enabled = False
     self.last_steer_disable = 0
@@ -68,40 +89,63 @@ class CarController(CarControllerBase):
     self._dbg = DebugLogger("long_ctrl")
 
   @staticmethod
-  def get_long_blend_params(v_ego, distance_val):
-    if distance_val == 1:
-      # Stock ACC holds a ~1.5s gap, so it reads a 0.46s close follow as
-      # permanently too near and idles at a small negative command. The coast
-      # threshold is where throttle authority starts tapering off; it sits well
-      # above the brake threshold so the taper spans several steps of the
-      # integer stock CMD signal instead of flipping on a 1-unit dither.
-      return (
-        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40]),
-        interp(v_ego, [0., 22., 25., 33.], [0.60, 0.65, 0.75, 0.90]),
-        interp(v_ego, [0., 10., 22., 25.], [-1.2, -2.0, -2.5, -3.0]),
-        interp(v_ego, [0., 10., 22., 25.], [-2.8, -4.0, -5.0, -6.0]),
-        interp(v_ego, [0., 10., 22., 25.], [-6.0, -7.0, -9.0, -10.0]),
-        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.35, 0.45]),
+  def get_long_blend_params(v_ego, distance_val, close_follow_enabled=True):
+    throttle_rate = interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40])
+    if close_follow_enabled and distance_val == 1:
+      # The stock controller targets a much larger gap than custom one-bar. Its
+      # mild negative gap command must not suppress throttle; deeper commands
+      # still blend braking and retain the urgent override.
+      return LongBlendParams(
+        throttle_rate=throttle_rate,
+        brake_release_rate=interp(v_ego, [0., 22., 25., 33.], [0.60, 0.65, 0.75, 0.90]),
+        stock_brake_threshold=interp(v_ego, [0., 10., 22., 25.], [-8.0, -10.0, -12.0, -14.0]),
+        hard_override=interp(v_ego, [0., 10., 22., 25.], [-16.0, -18.0, -20.0, -22.0]),
+        # Reaching the stock brake target used to be deliberately slow because the
+        # band was active most of the time. It now fires on a few percent of frames
+        # and means a real slowdown, so close it in under a second.
+        stock_brake_rate=interp(v_ego, [0., 22., 25., 33.], [0.45, 0.55, 0.65, 0.85]),
       )
 
-    if distance_val == 2:
-      return (
-        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40]),
-        interp(v_ego, [0., 22., 25., 33.], [0.60, 0.65, 0.75, 0.90]),
-        interp(v_ego, [0., 10., 22., 25.], [-1.2, -2.0, -2.5, -3.0]),
-        interp(v_ego, [0., 10., 22., 25.], [-2.8, -4.0, -5.0, -6.0]),
-        interp(v_ego, [0., 10., 22., 25.], [-6.0, -7.0, -9.0, -10.0]),
-        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.35, 0.45]),
-      )
-
-    return (
-      interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40]),
-      interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
-      interp(v_ego, [20., 28.], [-8., -15.]),
-      interp(v_ego, [20., 28.], [-8., -15.]),
-      interp(v_ego, [20., 28.], [-18., -25.]),
-      interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
+    return LongBlendParams(
+      throttle_rate=throttle_rate,
+      brake_release_rate=interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
+      stock_brake_threshold=interp(v_ego, [20., 28.], [-8., -15.]),
+      hard_override=interp(v_ego, [20., 28.], [-18., -25.]),
+      stock_brake_rate=interp(v_ego, [0., 22., 25., 33.], [0.8, 1.0, 1.4, 2.0]),
     )
+
+  @staticmethod
+  def blend_longitudinal_command(accel_raw, previous_accel, stock_scaled, v_ego, distance_val, close_follow_enabled):
+    params = CarController.get_long_blend_params(v_ego, distance_val, close_follow_enabled)
+    close_follow_active = close_follow_enabled and distance_val == 1
+
+    # Preserve the stable release behavior for every other vehicle and distance
+    # setting. Only X50 FL one-bar owns the custom close-follow blend below.
+    if not close_follow_active:
+      accel_cmd = (stock_scaled + accel_raw) / 2.0 if v_ego < 2.5 else min(stock_scaled, accel_raw)
+      return accel_cmd, False, params
+
+    urgent_stock_brake = stock_scaled <= params.hard_override
+    accel_cmd = accel_raw
+
+    if urgent_stock_brake:
+      # This is the stock controller reporting a real hard-braking event. Do not
+      # delay its command behind the comfort rate limiter.
+      return min(accel_raw, stock_scaled), True, params
+    elif stock_scaled < params.stock_brake_threshold:
+      stock_target = interp(stock_scaled, [params.hard_override, params.stock_brake_threshold], [params.hard_override, 0.0])
+      accel_cmd = min(accel_raw, stock_target)
+
+    if accel_cmd > previous_accel:
+      if previous_accel < 0.0:
+        accel_cmd = min(accel_cmd, min(0.0, previous_accel + params.brake_release_rate))
+      else:
+        accel_cmd = min(accel_cmd, previous_accel + params.throttle_rate)
+    else:
+      rate_down = params.stock_brake_rate if stock_scaled < params.stock_brake_threshold else 0.5
+      accel_cmd = max(accel_cmd, previous_accel - rate_down)
+
+    return accel_cmd, urgent_stock_brake, params
 
   def update(self, CC, CS, now_nanos):
     can_sends = []
@@ -148,14 +192,15 @@ class CarController(CarControllerBase):
         self.resume = CS.out.gasPressed or CS.res_btn_pressed
         if not self.is_sng_check:
           self.is_sng_check = True
-          self.sng_next_press_frame = self.frame + 310
+          distance_val = getattr(CS, "distance_val", 2)
+          self.sng_next_press_frame = self.frame + get_sng_resume_delay_frames(distance_val, self.close_follow_enabled)
           self.resume_counter = 0
 
         elif self.resume or self.resume_counter >= 2:
           self.sng_next_press_frame = max(self.sng_next_press_frame, self.frame + 110)
           self.resume_counter = 0
 
-        elif actuators.accel > 0 and self.frame > self.sng_next_press_frame:
+        elif actuators.accel > 0 and self.frame >= self.sng_next_press_frame:
           # to disengage from stock cruise standstill
           self.resume = True
           can_sends.append(send_buttons(self.packer, 0))
@@ -183,42 +228,13 @@ class CarController(CarControllerBase):
         stock_scaled = CS.stock_acc_cmd * mult
         accel_raw = accel_cmd
         distance_val = getattr(CS, "distance_val", 2)
-        throttle_rate, brake_release_rate, stock_coast_threshold, stock_brake_threshold, hard_override, stock_brake_rate = self.get_long_blend_params(CS.out.vEgo, distance_val)
+        blend_params = self.get_long_blend_params(CS.out.vEgo, distance_val, self.close_follow_enabled)
         urgent_stock_brake = False
 
         if not accel_blocked:
-          urgent_stock_brake = distance_val in (1, 2) and stock_scaled < hard_override
-          # For 1/2-bar, mild stock braking tapers throttle instead of cutting it, so a
-          # 1-unit dither in the integer stock CMD cannot flip full throttle to zero.
-          # Stronger stock braking then adds smooth brake so close-follow does not dive
-          # into a slowing lead.
-          if distance_val in (1, 2) and accel_raw > 0.0:
-            throttle_scale = interp(stock_scaled, [stock_brake_threshold, stock_coast_threshold], [0.0, 1.0])
-            accel_cmd = accel_raw * throttle_scale
-          if urgent_stock_brake:
-            accel_cmd = min(accel_cmd, stock_scaled)
-          elif distance_val in (1, 2) and stock_scaled < stock_brake_threshold:
-            stock_target = interp(stock_scaled, [hard_override, stock_brake_threshold], [hard_override, 0.0])
-            accel_cmd = min(accel_cmd, stock_target)
-
-          if accel_cmd > self._prev_accel_cmd:
-            if self._prev_accel_cmd < 0.0:
-              accel_cmd = min(accel_cmd, min(0.0, self._prev_accel_cmd + brake_release_rate))
-            else:
-              accel_cmd = min(accel_cmd, self._prev_accel_cmd + throttle_rate)
-          else:
-            urgent_rate_down = interp(CS.out.vEgo, [0., 10., 22., 28.], [0.7, 0.9, 1.3, 1.8])
-            rate_down = urgent_rate_down if urgent_stock_brake else (stock_brake_rate if distance_val in (1, 2) and stock_scaled < stock_brake_threshold else 0.5)
-            accel_cmd = max(accel_cmd, self._prev_accel_cmd - rate_down)
-
-          # Bar 3 keeps the older stock brake cap so relaxed follow stays stable.
-          if distance_val not in (1, 2) and stock_scaled < stock_brake_threshold:
-            stock_brake = min(stock_scaled, accel_raw)
-            if stock_brake < hard_override:
-              accel_cmd = stock_brake
-            else:
-              accel_cmd = max(stock_brake, self._prev_accel_cmd - stock_brake_rate)
-
+          accel_cmd, urgent_stock_brake, blend_params = self.blend_longitudinal_command(
+            accel_raw, self._prev_accel_cmd, stock_scaled, CS.out.vEgo, distance_val, self.close_follow_enabled,
+          )
           self._prev_accel_cmd = accel_cmd
 
         self._dbg.log({
@@ -228,11 +244,11 @@ class CarController(CarControllerBase):
           "aStock": round(stock_scaled, 2),
           "aPrev": round(self._prev_accel_cmd, 2),
           "gap": distance_val,
-          "thrRate": round(throttle_rate, 2),
-          "relRate": round(brake_release_rate, 2),
-          "coastTh": round(stock_coast_threshold, 2),
-          "stockTh": round(stock_brake_threshold, 2),
-          "stkBrRate": round(stock_brake_rate, 2),
+          "close": self.close_follow_enabled and distance_val == 1,
+          "thrRate": round(blend_params.throttle_rate, 2),
+          "relRate": round(blend_params.brake_release_rate, 2),
+          "stockTh": round(blend_params.stock_brake_threshold, 2),
+          "stkBrRate": round(blend_params.stock_brake_rate, 2),
           "urgent": urgent_stock_brake,
           "gas": CS.out.gasPressed,
           "stndstl": CS.out.standstill,
