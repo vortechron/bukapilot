@@ -55,7 +55,9 @@ T_IDXS = np.array(T_IDXS_LST)
 FCW_IDXS = T_IDXS < 5.0
 T_DIFFS = np.diff(T_IDXS, prepend=[0.])
 COMFORT_BRAKE = 2.5
-STOP_DISTANCE = 5.5
+# Dominates the gap at low speed, so this is the lever for jam closeness.
+# T_FOLLOW barely moves a standstill or crawling gap.
+STOP_DISTANCE = 4.0
 
 def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
@@ -72,7 +74,7 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard):
   if personality==log.LongitudinalPersonality.relaxed:
     return 0.75
   elif personality==log.LongitudinalPersonality.standard:
-    return 0.50
+    return 0.46
   elif personality==log.LongitudinalPersonality.aggressive:
     return 0.45
   else:
@@ -91,9 +93,12 @@ def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalP
   if closing_speed < 0.3 and lead_brake < 0.4:
     return 0.0
 
-  # Apply the same temporary safety margin to every selected gap so a closing
-  # lead cannot invert the driver's 1-bar < 2-bar < 3-bar choice.
-  max_boost = 0.60
+  # Keep enough temporary closing-speed margin to pass the hard-braking
+  # maneuver, while letting the two closer settings catch up slightly sooner.
+  if personality in (log.LongitudinalPersonality.aggressive, log.LongitudinalPersonality.standard):
+    max_boost = 0.58
+  else:
+    max_boost = 0.60
   speed_boost = np.interp(closing_speed, [0.3, 3.5], [0.0, max_boost])
   brake_boost = np.interp(lead_brake, [0.4, 2.0], [0.0, max_boost * 0.45])
   distance_factor = np.interp(d_rel, [12.0, 50.0], [1.0, 0.0])

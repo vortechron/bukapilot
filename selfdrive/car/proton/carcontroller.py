@@ -70,11 +70,15 @@ class CarController(CarControllerBase):
   @staticmethod
   def get_long_blend_params(v_ego, distance_val):
     if distance_val == 1:
-      # City follow needs quick brake release, but gentle real throttle.
+      # Stock ACC holds a ~1.5s gap, so it reads a 0.46s close follow as
+      # permanently too near and idles at a small negative command. The coast
+      # threshold is where throttle authority starts tapering off; it sits well
+      # above the brake threshold so the taper spans several steps of the
+      # integer stock CMD signal instead of flipping on a 1-unit dither.
       return (
-        interp(v_ego, [0., 22., 25., 33.], [0.08, 0.09, 0.12, 0.16]),
-        interp(v_ego, [0., 22., 25., 33.], [0.45, 0.50, 0.60, 0.75]),
-        interp(v_ego, [0., 10., 22., 25.], [-0.8, -1.5, -2.5, -3.0]),
+        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40]),
+        interp(v_ego, [0., 22., 25., 33.], [0.60, 0.65, 0.75, 0.90]),
+        interp(v_ego, [0., 10., 22., 25.], [-1.2, -2.0, -2.5, -3.0]),
         interp(v_ego, [0., 10., 22., 25.], [-2.8, -4.0, -5.0, -6.0]),
         interp(v_ego, [0., 10., 22., 25.], [-6.0, -7.0, -9.0, -10.0]),
         interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.35, 0.45]),
@@ -82,16 +86,16 @@ class CarController(CarControllerBase):
 
     if distance_val == 2:
       return (
-        interp(v_ego, [0., 22., 25., 33.], [0.08, 0.09, 0.12, 0.16]),
-        interp(v_ego, [0., 22., 25., 33.], [0.45, 0.50, 0.60, 0.75]),
-        interp(v_ego, [0., 10., 22., 25.], [-0.8, -1.5, -2.5, -3.0]),
+        interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40]),
+        interp(v_ego, [0., 22., 25., 33.], [0.60, 0.65, 0.75, 0.90]),
+        interp(v_ego, [0., 10., 22., 25.], [-1.2, -2.0, -2.5, -3.0]),
         interp(v_ego, [0., 10., 22., 25.], [-2.8, -4.0, -5.0, -6.0]),
         interp(v_ego, [0., 10., 22., 25.], [-6.0, -7.0, -9.0, -10.0]),
         interp(v_ego, [0., 22., 25., 33.], [0.25, 0.30, 0.35, 0.45]),
       )
 
     return (
-      interp(v_ego, [0., 22., 25., 33.], [0.09, 0.10, 0.15, 0.25]),
+      interp(v_ego, [0., 22., 25., 33.], [0.25, 0.28, 0.32, 0.40]),
       interp(v_ego, [0., 22., 25., 33.], [0.50, 0.55, 0.70, 0.85]),
       interp(v_ego, [20., 28.], [-8., -15.]),
       interp(v_ego, [20., 28.], [-8., -15.]),
@@ -184,15 +188,18 @@ class CarController(CarControllerBase):
 
         if not accel_blocked:
           urgent_stock_brake = distance_val in (1, 2) and stock_scaled < hard_override
-          # For 1/2-bar, mild stock braking only blocks throttle. Stronger stock braking
-          # adds smooth brake so close-follow does not dive into a slowing lead.
-          if distance_val in (1, 2) and stock_scaled < stock_coast_threshold:
-            accel_cmd = min(accel_raw, 0.0)
+          # For 1/2-bar, mild stock braking tapers throttle instead of cutting it, so a
+          # 1-unit dither in the integer stock CMD cannot flip full throttle to zero.
+          # Stronger stock braking then adds smooth brake so close-follow does not dive
+          # into a slowing lead.
+          if distance_val in (1, 2) and accel_raw > 0.0:
+            throttle_scale = interp(stock_scaled, [stock_brake_threshold, stock_coast_threshold], [0.0, 1.0])
+            accel_cmd = accel_raw * throttle_scale
           if urgent_stock_brake:
-            accel_cmd = min(accel_raw, stock_scaled)
+            accel_cmd = min(accel_cmd, stock_scaled)
           elif distance_val in (1, 2) and stock_scaled < stock_brake_threshold:
             stock_target = interp(stock_scaled, [hard_override, stock_brake_threshold], [hard_override, 0.0])
-            accel_cmd = min(accel_raw, stock_target)
+            accel_cmd = min(accel_cmd, stock_target)
 
           if accel_cmd > self._prev_accel_cmd:
             if self._prev_accel_cmd < 0.0:

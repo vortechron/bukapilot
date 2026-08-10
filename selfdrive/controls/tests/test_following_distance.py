@@ -40,17 +40,28 @@ class TestFollowGapTuning(unittest.TestCase):
   def test_bar_follow_times(self):
     follow_times = {bar: get_T_FOLLOW(personality) for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    # Two bar keeps the previous 1-bar target. One bar is a small step closer,
-    # while 3 bar is only a moderate step farther.
-    self.assertEqual(follow_times, {1: 0.45, 2: 0.50, 3: 0.75})
+    # One bar stays at the lowest high-speed value that passes the planner
+    # simulation. Two bar moves almost to the same steady target, while its
+    # small base step keeps it more conservative.
+    self.assertEqual(follow_times, {1: 0.45, 2: 0.46, 3: 0.75})
 
   def test_bar_gap_steps_at_90_kph(self):
     v_ego = v_lead = 25.0
     gaps = [desired_follow_distance(v_ego, v_lead, get_T_FOLLOW(personality)) for personality in self.BAR_PERSONALITIES.values()]
 
-    self.assertGreaterEqual(gaps[0], 16.5)
-    self.assertAlmostEqual(gaps[1] - gaps[0], 1.25)
-    self.assertAlmostEqual(gaps[2] - gaps[1], 6.25)
+    self.assertGreaterEqual(gaps[0], 15.25)
+    self.assertAlmostEqual(gaps[1] - gaps[0], 0.25)
+    self.assertAlmostEqual(gaps[2] - gaps[1], 7.25)
+
+  def test_approach_boost_caps_keep_close_bars_closer(self):
+    radarstate = SimpleNamespace(
+      leadOne=SimpleNamespace(status=True, dRel=12.0, vLead=15.0, aLeadK=-3.0),
+      leadTwo=SimpleNamespace(status=False),
+    )
+
+    boosts = {bar: get_approach_t_follow_boost(25.0, radarstate, personality) for bar, personality in self.BAR_PERSONALITIES.items()}
+
+    self.assertEqual(boosts, {1: 0.58, 2: 0.58, 3: 0.60})
 
   def test_approach_boost_preserves_bar_order(self):
     scenarios = [
