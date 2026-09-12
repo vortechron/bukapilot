@@ -76,7 +76,11 @@ PROTON_X50_FL_ONE_BAR_T_FOLLOW = 0.81
 PROTON_X50_FL_ONE_BAR_STOP_DISTANCE = 4.0
 # Keep the gap penalty at the full target. In the delayed-loop simulation the
 # stock 0.75 / 100 penalty braked later and harder and collided in stop cases.
-PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST = 10000.
+# Cost 10000 was a cliff: drive logs on 2026-09-12 showed 0.8-1.6 m/s^2 planner
+# braking for predicted shortfalls of 1-2 m while still 3 m beyond the steady
+# target, giving a chase / brake / drop-back cycle. 2000 keeps the wall but lets
+# small, brief shortfalls pass with gentle braking.
+PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST = 2000.
 PROTON_X50_FL_ONE_BAR_DANGER_FACTOR = 1.0
 # The boost grows the target while closing, which the driver felt as braking
 # harder than the lead and dropping back. Halved from 0.20s after road feedback.

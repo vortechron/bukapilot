@@ -458,7 +458,7 @@ approximate delayed car model. Road validation is still required.
 | `STOP_DISTANCE` | 5.5m | Generated-solver baseline; scoped obstacle offsets are 1.5m for bar 1 and 1.0m for bar 2, giving 4.0m / 4.5m effective stop targets |
 | `COMFORT_BRAKE` | 2.5 m/s² | Comfortable decel for gap calc |
 | `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
-| One-bar gap penalty | Factor 1.0, cost 10000 | Starts at the full target; other ACC profiles keep factor 0.75, cost 100. Still a soft constraint |
+| One-bar gap penalty | Factor 1.0, cost 2000 | Starts at the full target; other ACC profiles keep factor 0.75, cost 100. Still a soft constraint. Was 10000 until 2026-09-12 drive logs showed it caused chase/brake cycling |
 | `LEAD_PERSIST_FRAMES` | 60 | X50 FL ghost lead for 3s at the 20Hz planner rate |
 
 **Rate Limiter** (`carcontroller.py`):
@@ -543,6 +543,7 @@ elif not x50_fl_one_bar:
 - Driver feedback from the road on 0.90s / 4.0m: gap acceptable, about 10% too far; during lead slowdowns one bar braked harder than needed and held the gap strictly instead of easing in.
 - Follow time 0.90s → 0.81s (24.25m at 90 km/h, 17.5m at 60 km/h). Stop gap stays 4.0m. Approach boost cap 0.20s → 0.10s so the target grows less while closing.
 - Gap penalty left at factor 1.0 / cost 10000. Delayed-loop runs before this edit showed the stock 0.75 / 100 penalty braked later and harder (peak 1.5–3.0 m/s² vs 1.1–2.3) and collided in every lead-stop case; factor 0.85 / cost 1000 also collided at 90 km/h with a 3 m/s² lead stop.
+- Road drive on 0.81s / boost 0.10 (commit 96baf78f1): overall better, but a chase / brake / far / chase cycle while catching up. Log analysis of 943s of engaged one-bar following: 1821 of 1912 hard-brake samples while the gap was still >2m beyond the steady target were planner requests, only 91 came from the stock blend. Median steady excess during hard braking was 3.1m, median predicted shortfall into the required gap only 1.3m, `aLeadK` was 0 in every sample. Cause: the factor 1.0 / cost 10000 wall turns small lead speed dips into 0.8-1.6 m/s² brakes. Cost lowered to 2000; factor, follow time, stop gap and boost unchanged. Not simulated; road validation required.
 - The 0.10s boost with the unchanged penalty was not simulated. The focused native suites were not run on this Mac (Linux ARM binary gap above). Road validation required; revert the boost first if slowdowns feel late.
 
 Run the focused native suites on this Mac. Do not run them on the dongle and do

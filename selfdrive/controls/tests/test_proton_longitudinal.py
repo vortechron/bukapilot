@@ -235,7 +235,7 @@ def test_selected_bar_settings_reach_native_mpc(distance_bar, profile, monkeypat
   assert captured_costs[-1][4:] == expected_smoothing
   custom_one_bar = profile == LongitudinalFollowProfile.proton_x50_fl and distance_bar == 1
   assert np.all(mpc.params[:, 5] == (1.0 if custom_one_bar else 0.75))
-  assert captured_constraints[-1] == [1e6, 1e6, 1e6, 10000.0 if custom_one_bar else 100.0]
+  assert captured_constraints[-1] == [1e6, 1e6, 1e6, 2000.0 if custom_one_bar else 100.0]
 
   mpc.mode = 'blended'
   mpc.set_weights(personality=plant.personality)
