@@ -226,7 +226,7 @@ def test_selected_bar_settings_reach_native_mpc(distance_bar, profile, monkeypat
   plant.lead_samples.extend([(6.0, 5.0)] * plant.lead_samples.maxlen)
   plant.step(5.0)
   is_proton = profile == LongitudinalFollowProfile.proton_x50_fl
-  follow_times = {1: 0.90, 2: 1.02, 3: 1.25} if is_proton else {1: 1.20, 2: 1.25, 3: 1.40}
+  follow_times = {1: 0.81, 2: 1.02, 3: 1.25} if is_proton else {1: 1.20, 2: 1.25, 3: 1.40}
   stop_offsets = {1: 1.5, 2: 1.0, 3: 0.0} if is_proton else {1: 0.0, 2: 0.0, 3: 0.0}
   assert np.all(mpc.params[:, 4] == follow_times[distance_bar])
   assert mpc.source == 'lead0'

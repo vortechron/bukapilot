@@ -10,6 +10,9 @@ Keep the technical guidance aligned when either file changes.
 - Prefer narrow validation. Run targeted `pytest`, `ruff`, or `mypy` commands that match the files touched.
 - Treat the dongle tmux session as live process control. Do not send `Ctrl+C` or `exit`; detach with backtick then `d`.
 - Cap debug output and check disk usage before adding logs on device.
+- Deploy is four steps only: test on this Mac, `git push`, `git pull` on the dongle, `sudo reboot`. Do not add build, container, or on-device test stages.
+- Never run the test suite on the dongle and never use Docker as part of a deploy.
+- Check `git status --short` and `git log --oneline -3` on the dongle before pushing, so unpushed device edits are not lost.
 
 # Bukapilot (KommuAssist) Development Guide
 
@@ -20,7 +23,7 @@ Keep the technical guidance aligned when either file changes.
 scons -j4                          # full build
 scons -j4 selfdrive/car/           # build specific target
 
-# Test
+# Test (run on this Mac, never on the dongle, never in a container)
 pytest --ignore=openpilot/ --ignore=opendbc/ --ignore=panda/ -n auto
 pytest selfdrive/car/tests/        # car-specific tests
 pytest -k "test_name" -x           # single test, stop on fail
@@ -119,7 +122,7 @@ bukapilot runs multiple processes that communicate with each other (like microse
 ### Connect
 ```bash
 # Preferred: via Tailscale (works from any network)
-ssh kommu@100.82.157.42
+ssh kommu@100.109.133.69
 
 # Fallback: via local Wi-Fi (must be on same network)
 ssh kommu@<device-wifi-ip>
@@ -149,9 +152,45 @@ tmux a              → attach to the running session
 
 ## Development Workflow
 
+### Deploy Rules (keep it simple)
+
+A deploy is four steps. Do not add more.
+
+1. Run the tests on this Mac.
+2. `git push` from this Mac.
+3. `git pull` on the dongle.
+4. Restart bukapilot on the dongle (`sudo reboot`).
+
+Rules:
+
+- Never run the test suite on the dongle. The dongle is for driving, not for testing.
+- Docker is not part of a deploy. Do not build, start, or test inside any container as a deploy step.
+- No extra build, sync, or verification stages. If a step is not in the list above, it is not part of the deploy.
+- The only exception is C/C++ changes, which still need `scons -j4` on the device (see Compilation Rules below).
+
+### Before You Push: Check the Dongle First
+
+The dongle can hold edits that were never pushed to git. Losing them is the main
+risk of a deploy, so check before you push:
+
+```bash
+ssh kommu@100.109.133.69 'cd /data/openpilot && git log --oneline -3 && git status --short && git stash list'
+```
+
+What the result means:
+
+- Clean tree, and its commit is already in your history → safe. `git pull` will fast-forward.
+- Uncommitted changes shown by `git status --short` → save them first on the device
+  (`git stash`, or `git diff > /tmp/dongle-local.patch`), then pull.
+- Different branch, or commits you do not have → decide what to keep before pulling.
+  Do not reset or force-update the device checkout to make the pull succeed.
+
+If the dongle does not answer SSH, stop there. Finish the local work, push it,
+and deploy when the device is back online. Do not guess what is on the device.
+
 ### Git Setup on Device
 ```bash
-ssh kommu@192.168.0.64
+ssh kommu@100.109.133.69
 cd /data/openpilot
 
 # Check current remotes
@@ -167,25 +206,32 @@ git checkout -b my-custom-branch origin/release_ka2
 git push myfork my-custom-branch
 ```
 
-### Daily Development Cycle
+### Daily Deploy Cycle
 ```bash
-# 1. Edit code locally on your machine and push
+# 1. On this Mac: run the focused tests
+python -m pytest selfdrive/car/tests/test_proton_following.py \
+  selfdrive/controls/tests/test_following_distance.py \
+  selfdrive/controls/tests/test_proton_longitudinal.py \
+  -q -n0 -W ignore::ResourceWarning
+
+# 2. On this Mac: check the dongle, then commit and push
+ssh kommu@100.109.133.69 'cd /data/openpilot && git status --short'
 git add <files>
 git commit -m "description of change"
-git push myfork my-custom-branch
+git push origin release_ka2_x50_fl
 
-# 2. SSH into dongle (car should be off or ignition-only)
-ssh kommu@192.168.0.64
+# 3. SSH into dongle (car should be off or ignition-only)
+ssh kommu@100.109.133.69
 cd /data/openpilot
 
-# 3. Pull changes
-git pull myfork my-custom-branch
+# 4. Pull changes
+git pull origin release_ka2_x50_fl
 
-# 4. Reboot to restart bukapilot
+# 5. Restart bukapilot
 sudo reboot
 
-# 5. SSH back in (~30 seconds) and watch logs
-ssh kommu@192.168.0.64
+# 6. SSH back in (~30 seconds) and watch logs
+ssh kommu@100.109.133.69
 tmux a
 ```
 
@@ -316,7 +362,7 @@ In KommuApp → Device Settings → "Car Off to Format SD Card" → Format. This
 ### Option 1: Log Replay (recommended)
 ```bash
 # Copy drive logs from dongle to laptop
-scp -i ~/.ssh/id_ed25519 -r kommu@192.168.0.64:/data/media/0/realdata/<drive_folder> ~/drives/
+scp -i ~/.ssh/id_ed25519 -r kommu@100.109.133.69:/data/media/0/realdata/<drive_folder> ~/drives/
 
 # On laptop with bukapilot built locally (Ubuntu/Linux required)
 cd ~/bukapilot
@@ -389,19 +435,19 @@ modeld (20Hz) → radarState (leads) → longitudinal_planner.py (20Hz)
 **Follow Distance** (`long_mpc.py`):
 | X50 FL / S70 bar | Personality | T_FOLLOW | Effective stop gap | Gap at 90 km/h |
 |------------------|-------------|----------|--------------------|----------------|
-| 1 | Aggressive | 0.90s | 4.0m | 26.5m |
+| 1 | Aggressive | 0.81s | 4.0m | 24.25m |
 | 2 | Standard | 1.02s | 4.5m | 30.0m |
 | 3 | Relaxed (old 2-bar smoothing) | 1.25s | 5.5m | 36.75m |
 
 Other platforms retain the stable 1.20s / 1.25s / 1.40s personality values and the 5.5m stop gap.
 
-**Do not lower the one-bar values below 0.85s / 3.5m.** An earlier tune used
+**Do not lower the one-bar values below 0.80s / 3.5m.** An earlier tune used
 0.28s with a 2.5m stop gap, giving a 9.5m target and 0.38s of headway at
 90 km/h. On the road it did not settle: the gap oscillated and ratcheted closed
 until the driver had to intervene. The Proton configuration specifies
 0.4–0.5s actuator delay. Camera delay and control response also affect the loop;
 their combined effect has not been measured from this drive.
-`test_one_bar_headway_keeps_minimum_candidate_margin` guards at least 1.0s of
+`test_one_bar_headway_keeps_minimum_candidate_margin` guards at least 0.9s of
 headway from 30 to 110 km/h. That arithmetic check does not prove stability;
 `test_proton_longitudinal.py` separately tests the real control code with an
 approximate delayed car model. Road validation is still required.
@@ -449,7 +495,7 @@ elif not x50_fl_one_bar:
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | One-bar-only close follow | ⚠️ 0.28s + 2.5m was road-tested and rejected: the gap oscillated and ratcheted closed. Now 0.90s + 4.0m (26.5m at 90 km/h); device validation pending |
+| 1 | One-bar-only close follow | ⚠️ 0.28s + 2.5m was road-tested and rejected: the gap oscillated and ratcheted closed. 0.90s + 4.0m was road-tested as acceptable but slightly far. Now 0.81s + 4.0m (24.25m at 90 km/h) with a 0.10s approach boost cap; road validation pending |
 | 2 | Ordered bar targets | Bar 2: 30m at 90 km/h, 4.5m stop target, 1.5s resume; bar 3 takes old bar 2 settings. Local candidate; device validation pending |
 | 3 | Responsive traffic-jam resume | ✅ 0.5s one-bar automatic RES; device validation pending |
 | 4 | Stable camera lead | ✅ Relative-motion persistence for 60 frames / 3s; replay validation pending |
@@ -463,12 +509,13 @@ elif not x50_fl_one_bar:
 4. **Keep a stock brake safety layer** — ignore only mild one-bar gap nagging; blend real braking and retain the hard override
 5. **Camera-only needs correctly timed lead persistence** — use relative motion and the real 20Hz planner interval
 6. **Asymmetric rates** — bounded throttle and faster braking match human expectations
-7. **Limit approach-target movement** — the boost responds to closing speed or lead braking. Its interpolation is continuous at the closing-speed threshold. The 0.20s cap reduces target movement, but has not been proved to resolve the reported road oscillation
+7. **Limit approach-target movement** — the boost responds to closing speed or lead braking. Its interpolation is continuous at the closing-speed threshold. The cap was halved from 0.20s to 0.10s on 2026-09-12 after the driver felt one bar braking harder than the lead and dropping back during slowdowns
 8. **Custom stock blending stays one-bar-only** — the user changed X50 FL bar 2/3 gap and resume settings on 2026-09-10. Their stock blend stays original; other vehicle profiles stay unchanged
 9. **Do not delay or prolong planned braking** — pass planned brake onset and release through. Return to zero before ramping positive throttle. Smooth stock brake release only while stock still requests braking below its threshold; urgent stock braking stays immediate
 10. **User wants one bar close and responsive** — traffic-jam and moving follow use the same isolated custom profile
 11. **Do not retune closer from gap maths alone** — the earlier 0.38s headway was associated with reported shrinking-gap oscillation. Keep the candidate margin until recorded-drive and delayed-loop evidence supports any further tuning; a numeric headway alone is not a stability guarantee
 12. **Stock ACC opinion is a gap preference, not a hazard signal** — its command tracks closing speed, and `aLeadK` reads 0.00 on this camera-only car. Never let it gate throttle; use it only as a deep brake floor
+13. **Do not loosen the one-bar gap penalty to soften braking** — in the delayed loop a looser penalty brakes later and harder, not softer. Soften slowdowns by limiting target growth (approach boost) instead
 
 ### Local one-bar following fixes — 2026-09-05
 
@@ -491,11 +538,26 @@ elif not x50_fl_one_bar:
 - Validation: 114 tests passed (90 controller/planner tests plus 24 Following Lab tests). Syntax and whitespace checks pass; lint reports only the four existing findings.
 - No commit, push, or dongle deployment was performed. These are target settings, not guaranteed road gaps.
 
-Run the focused native suites on a supported Linux runtime:
+### Local one-bar road-feedback tune — 2026-09-12
+
+- Driver feedback from the road on 0.90s / 4.0m: gap acceptable, about 10% too far; during lead slowdowns one bar braked harder than needed and held the gap strictly instead of easing in.
+- Follow time 0.90s → 0.81s (24.25m at 90 km/h, 17.5m at 60 km/h). Stop gap stays 4.0m. Approach boost cap 0.20s → 0.10s so the target grows less while closing.
+- Gap penalty left at factor 1.0 / cost 10000. Delayed-loop runs before this edit showed the stock 0.75 / 100 penalty braked later and harder (peak 1.5–3.0 m/s² vs 1.1–2.3) and collided in every lead-stop case; factor 0.85 / cost 1000 also collided at 90 km/h with a 3 m/s² lead stop.
+- The 0.10s boost with the unchanged penalty was not simulated. The focused native suites were not run on this Mac (Linux ARM binary gap above). Road validation required; revert the boost first if slowdowns feel late.
+
+Run the focused native suites on this Mac. Do not run them on the dongle and do
+not run them inside a container:
 
 ```bash
 python -m pytest selfdrive/car/tests/test_proton_following.py selfdrive/controls/tests/test_following_distance.py selfdrive/controls/tests/test_proton_longitudinal.py -q -n0 -W ignore::ResourceWarning
 ```
+
+**Known gap, checked 2026-09-12:** this command does not run on macOS yet. The
+checked-in `openpilot/common/params_pyx.so` is a Linux ARM binary, so the root
+`conftest.py` cannot import it and pytest stops before it collects any test.
+Making the Mac run these suites needs a local macOS build: `tools/mac_setup.sh`,
+then `scons -j4`. Until that build exists, say plainly that the tests were not
+run instead of substituting another runtime.
 
 ## Project Structure (Key Directories)
 ```

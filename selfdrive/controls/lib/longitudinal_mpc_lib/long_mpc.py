@@ -68,12 +68,19 @@ class LongitudinalFollowProfile(IntEnum):
 
 
 PROTON_X50_FL_FINGERPRINT = "PROTON S70"
-# Widen the earlier 0.28s / 2.5m tune after reports of an oscillating, shrinking
-# gap. The controller config includes 0.4-0.5s actuator delay. These candidate
-# margins need drive-log validation; their size alone does not prove stability.
-PROTON_X50_FL_ONE_BAR_T_FOLLOW = 0.90
+# The earlier 0.28s / 2.5m tune oscillated on the road. 0.90s / 4.0m was then
+# road-tested as acceptable and 10% too far, so the follow time is 0.81s. The
+# controller config includes 0.4-0.5s actuator delay; road validation is still
+# required for every change here.
+PROTON_X50_FL_ONE_BAR_T_FOLLOW = 0.81
 PROTON_X50_FL_ONE_BAR_STOP_DISTANCE = 4.0
+# Keep the gap penalty at the full target. In the delayed-loop simulation the
+# stock 0.75 / 100 penalty braked later and harder and collided in stop cases.
 PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST = 10000.
+PROTON_X50_FL_ONE_BAR_DANGER_FACTOR = 1.0
+# The boost grows the target while closing, which the driver felt as braking
+# harder than the lead and dropping back. Halved from 0.20s after road feedback.
+PROTON_X50_FL_ONE_BAR_MAX_APPROACH_BOOST = 0.10
 # At 90 km/h: 1.02 * 25 + 4.5 = 30m. Three bars takes the old two-bar target.
 PROTON_X50_FL_TWO_BAR_T_FOLLOW = 1.02
 PROTON_X50_FL_TWO_BAR_STOP_DISTANCE = 4.5
@@ -152,9 +159,8 @@ def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalP
 
   # Limit target movement while closing or when the lead brakes. The speed
   # boost is continuous at 0.3 m/s; the independent brake boost can also apply
-  # while the lead pulls away. Reducing this cap is a tuning candidate, not
-  # proof that the reported oscillation is resolved.
-  max_boost = 0.20
+  # while the lead pulls away. The cap is a road-tuning candidate only.
+  max_boost = PROTON_X50_FL_ONE_BAR_MAX_APPROACH_BOOST
   speed_boost = np.interp(closing_speed, [0.3, 3.5], [0.0, max_boost])
   brake_boost = np.interp(lead_brake, [0.4, 2.0], [0.0, max_boost * 0.45])
   distance_factor = np.interp(d_rel, [12.0, 50.0], [1.0, 0.0])
@@ -490,7 +496,7 @@ class LongitudinalMpc:
       # The normal 0.75 factor permits undershooting the desired gap. One bar
       # has less spare distance, so start the stronger penalty at its full
       # target. This is still a soft constraint, not a collision guarantee.
-      self.params[:,5] = 1.0 if is_x50_fl_one_bar(personality, self.follow_profile) else LEAD_DANGER_FACTOR
+      self.params[:,5] = PROTON_X50_FL_ONE_BAR_DANGER_FACTOR if is_x50_fl_one_bar(personality, self.follow_profile) else LEAD_DANGER_FACTOR
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
       # when the leads are no factor.

@@ -46,7 +46,7 @@ class TestFollowGapTuning(unittest.TestCase):
   def test_bar_follow_times(self):
     follow_times = {bar: get_T_FOLLOW(personality, self.FOLLOW_PROFILE) for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    self.assertEqual(follow_times, {1: 0.90, 2: 1.02, 3: 1.25})
+    self.assertEqual(follow_times, {1: 0.81, 2: 1.02, 3: 1.25})
 
   def test_default_follow_times_remain_unchanged(self):
     follow_times = {bar: get_T_FOLLOW(personality) for bar, personality in self.BAR_PERSONALITIES.items()}
@@ -59,7 +59,7 @@ class TestFollowGapTuning(unittest.TestCase):
                                     get_stop_distance(personality, self.FOLLOW_PROFILE))
             for personality in self.BAR_PERSONALITIES.values()]
 
-    self.assertEqual(gaps, [26.5, 30.0, 36.75])
+    self.assertEqual(gaps, [24.25, 30.0, 36.75])
     self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.aggressive, self.FOLLOW_PROFILE), 1.5)
     self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.standard, self.FOLLOW_PROFILE), 1.0)
     self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.relaxed, self.FOLLOW_PROFILE), 0.0)
@@ -82,18 +82,19 @@ class TestFollowGapTuning(unittest.TestCase):
 
   def test_one_bar_headway_keeps_minimum_candidate_margin(self):
     # Guard against accidentally restoring the rejected 0.28s / 2.5m tune.
+    # 0.81s is the road-requested 10% reduction from the accepted 0.90s.
     # This is a static margin check, not a test of closed-loop stability.
     personality = log.LongitudinalPersonality.aggressive
     t_follow = get_T_FOLLOW(personality, self.FOLLOW_PROFILE)
     stop_distance = get_stop_distance(personality, self.FOLLOW_PROFILE)
 
-    self.assertGreaterEqual(t_follow, 0.85)
+    self.assertGreaterEqual(t_follow, 0.80)
     self.assertGreaterEqual(stop_distance, 3.5)
 
     for kph in (30.0, 50.0, 70.0, 90.0, 110.0):
       v = kph / 3.6
       gap = desired_follow_distance(v, v, t_follow, stop_distance)
-      self.assertGreaterEqual(gap / v, 1.0, f"only {gap / v:.2f}s of headway at {kph:.0f} km/h")
+      self.assertGreaterEqual(gap / v, 0.9, f"only {gap / v:.2f}s of headway at {kph:.0f} km/h")
 
   def test_approach_boost_is_limited_to_custom_one_bar(self):
     radarstate = SimpleNamespace(
@@ -104,7 +105,7 @@ class TestFollowGapTuning(unittest.TestCase):
     boosts = {bar: get_approach_t_follow_boost(25.0, radarstate, personality, self.FOLLOW_PROFILE)
               for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    self.assertEqual(boosts, {1: 0.20, 2: 0.0, 3: 0.0})
+    self.assertEqual(boosts, {1: 0.10, 2: 0.0, 3: 0.0})
 
   def test_approach_boost_preserves_extra_one_bar_margin(self):
     scenarios = [
