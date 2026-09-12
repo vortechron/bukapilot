@@ -14,7 +14,8 @@ from cereal import log
 from openpilot.selfdrive.controls.lib import longitudinal_planner as longitudinal_planner_module
 from openpilot.selfdrive.controls.lib.longitudinal_mpc_lib.long_mpc import LEAD_PERSIST_FRAMES, LongitudinalFollowProfile, LongitudinalMpc, \
                                                                     desired_follow_distance, get_approach_t_follow_boost, get_follow_profile, \
-                                                                    get_lead_obstacle_offset, get_stop_distance, get_T_FOLLOW, project_missing_lead
+                                                                    get_jerk_factor, get_lead_obstacle_offset, get_stop_distance, get_T_FOLLOW, \
+                                                                    project_missing_lead
 from openpilot.selfdrive.test.longitudinal_maneuvers.maneuver import Maneuver
 
 
@@ -45,7 +46,7 @@ class TestFollowGapTuning(unittest.TestCase):
   def test_bar_follow_times(self):
     follow_times = {bar: get_T_FOLLOW(personality, self.FOLLOW_PROFILE) for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    self.assertEqual(follow_times, {1: 0.28, 2: 1.25, 3: 1.40})
+    self.assertEqual(follow_times, {1: 0.90, 2: 1.02, 3: 1.25})
 
   def test_default_follow_times_remain_unchanged(self):
     follow_times = {bar: get_T_FOLLOW(personality) for bar, personality in self.BAR_PERSONALITIES.items()}
@@ -58,27 +59,41 @@ class TestFollowGapTuning(unittest.TestCase):
                                     get_stop_distance(personality, self.FOLLOW_PROFILE))
             for personality in self.BAR_PERSONALITIES.values()]
 
-    self.assertEqual(gaps, [9.5, 36.75, 40.5])
-    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.aggressive, self.FOLLOW_PROFILE), 3.0)
-    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.standard, self.FOLLOW_PROFILE), 0.0)
+    self.assertEqual(gaps, [26.5, 30.0, 36.75])
+    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.aggressive, self.FOLLOW_PROFILE), 1.5)
+    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.standard, self.FOLLOW_PROFILE), 1.0)
+    self.assertEqual(get_lead_obstacle_offset(log.LongitudinalPersonality.relaxed, self.FOLLOW_PROFILE), 0.0)
 
-  def test_one_bar_matches_requested_physical_gap_ranges(self):
+  def test_stop_targets_and_steady_gap_order(self):
+    self.assertEqual([get_stop_distance(p, self.FOLLOW_PROFILE) for p in self.BAR_PERSONALITIES.values()], [4.0, 4.5, 5.5])
+    self.assertEqual([get_stop_distance(p) for p in self.BAR_PERSONALITIES.values()], [5.5, 5.5, 5.5])
+    for speed in (0.0, 5.0, 15.0, 25.0, 35.0):
+      gaps = [desired_follow_distance(speed, speed, get_T_FOLLOW(p, self.FOLLOW_PROFILE), get_stop_distance(p, self.FOLLOW_PROFILE))
+              for p in self.BAR_PERSONALITIES.values()]
+      self.assertLess(gaps[0], gaps[1])
+      self.assertLess(gaps[1], gaps[2])
+
+  def test_three_bar_matches_previous_standard_settings(self):
+    three_bar = log.LongitudinalPersonality.relaxed
+    old_two_bar = log.LongitudinalPersonality.standard
+    for setting in (get_T_FOLLOW, get_stop_distance, get_jerk_factor):
+      self.assertEqual(setting(three_bar, self.FOLLOW_PROFILE), setting(old_two_bar))
+    self.assertEqual(get_jerk_factor(three_bar), 1.0)
+
+  def test_one_bar_headway_keeps_minimum_candidate_margin(self):
+    # Guard against accidentally restoring the rejected 0.28s / 2.5m tune.
+    # This is a static margin check, not a test of closed-loop stability.
     personality = log.LongitudinalPersonality.aggressive
     t_follow = get_T_FOLLOW(personality, self.FOLLOW_PROFILE)
     stop_distance = get_stop_distance(personality, self.FOLLOW_PROFILE)
 
-    jam_gap = desired_follow_distance(0.0, 0.0, t_follow, stop_distance)
-    city_speed = 50.0 / 3.6
-    city_gap = desired_follow_distance(city_speed, city_speed, t_follow, stop_distance)
-    highway_speed = 100.0 / 3.6
-    highway_gap = desired_follow_distance(highway_speed, highway_speed, t_follow, stop_distance)
+    self.assertGreaterEqual(t_follow, 0.85)
+    self.assertGreaterEqual(stop_distance, 3.5)
 
-    self.assertGreaterEqual(jam_gap, 2.25)
-    self.assertLessEqual(jam_gap, 2.75)
-    self.assertGreaterEqual(city_gap, 6.0)
-    self.assertLessEqual(city_gap, 7.0)
-    self.assertGreaterEqual(highway_gap, 9.0)
-    self.assertLessEqual(highway_gap, 11.0)
+    for kph in (30.0, 50.0, 70.0, 90.0, 110.0):
+      v = kph / 3.6
+      gap = desired_follow_distance(v, v, t_follow, stop_distance)
+      self.assertGreaterEqual(gap / v, 1.0, f"only {gap / v:.2f}s of headway at {kph:.0f} km/h")
 
   def test_approach_boost_is_limited_to_custom_one_bar(self):
     radarstate = SimpleNamespace(
@@ -89,9 +104,9 @@ class TestFollowGapTuning(unittest.TestCase):
     boosts = {bar: get_approach_t_follow_boost(25.0, radarstate, personality, self.FOLLOW_PROFILE)
               for bar, personality in self.BAR_PERSONALITIES.items()}
 
-    self.assertEqual(boosts, {1: 0.58, 2: 0.0, 3: 0.0})
+    self.assertEqual(boosts, {1: 0.20, 2: 0.0, 3: 0.0})
 
-  def test_approach_boost_preserves_bar_order(self):
+  def test_approach_boost_preserves_extra_one_bar_margin(self):
     scenarios = [
       # Steady lead, moderate closing, and close braking lead.
       (20.0, 20.0, 0.0, 20.0),
@@ -110,7 +125,12 @@ class TestFollowGapTuning(unittest.TestCase):
           actual_follow_times.append(get_T_FOLLOW(personality, self.FOLLOW_PROFILE) +
                                      get_approach_t_follow_boost(v_ego, radarstate, personality, self.FOLLOW_PROFILE))
 
-        self.assertLess(actual_follow_times[0], actual_follow_times[1])
+        # One bar may briefly ask for more room than the new, closer two-bar
+        # target. Do not reduce its approach margin just to enforce bar order.
+        self.assertGreaterEqual(actual_follow_times[0], get_T_FOLLOW(self.BAR_PERSONALITIES[1], self.FOLLOW_PROFILE))
+        self.assertLess(actual_follow_times[0], actual_follow_times[2])
+        self.assertEqual(actual_follow_times[1], 1.02)
+        self.assertEqual(actual_follow_times[2], 1.25)
         self.assertLess(actual_follow_times[1], actual_follow_times[2])
 
   def test_lead_persistence_is_isolated_per_slot(self):

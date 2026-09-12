@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from math import floor
 from opendbc.can.packer import CANPacker
 from openpilot.selfdrive.car.interfaces import CarControllerBase
 from openpilot.selfdrive.car.proton.protoncan import create_can_steer_command, send_buttons, create_acc_cmd
@@ -12,6 +13,7 @@ from openpilot.common.debug_logger import DebugLogger
 
 SNG_DEFAULT_RESUME_DELAY_S = 3.1
 SNG_CLOSE_FOLLOW_RESUME_DELAY_S = 0.5
+SNG_TWO_BAR_RESUME_DELAY_S = 1.5
 
 
 @dataclass(frozen=True)
@@ -24,7 +26,12 @@ class LongBlendParams:
 
 
 def get_sng_resume_delay_frames(distance_val, close_follow_enabled):
-  delay_s = SNG_CLOSE_FOLLOW_RESUME_DELAY_S if close_follow_enabled and distance_val == 1 else SNG_DEFAULT_RESUME_DELAY_S
+  delay_s = SNG_DEFAULT_RESUME_DELAY_S
+  if close_follow_enabled:
+    if distance_val == 1:
+      delay_s = SNG_CLOSE_FOLLOW_RESUME_DELAY_S
+    elif distance_val == 2:
+      delay_s = SNG_TWO_BAR_RESUME_DELAY_S
   return round(delay_s / DT_CTRL)
 
 
@@ -138,12 +145,20 @@ class CarController(CarControllerBase):
 
     if accel_cmd > previous_accel:
       if previous_accel < 0.0:
-        accel_cmd = min(accel_cmd, min(0.0, previous_accel + params.brake_release_rate))
+        # Follow planned brake release as well as onset. Filtering its release
+        # stretches brief corrections into long brake pulses. Keep the stock
+        # release ramp only while stock is still requesting additional braking.
+        release_limit = min(0.0, previous_accel + params.brake_release_rate) if stock_scaled < params.stock_brake_threshold else 0.0
+        accel_cmd = min(accel_cmd, release_limit)
       else:
         accel_cmd = min(accel_cmd, previous_accel + params.throttle_rate)
     else:
+      # Never keep throttle on while either controller asks to brake. Smooth
+      # added stock braking from at most zero, and let the planner's own
+      # slowdown pass through: another ramp here delays braking and adds lag
+      # to the one-bar feedback loop.
       rate_down = params.stock_brake_rate if stock_scaled < params.stock_brake_threshold else 0.5
-      accel_cmd = max(accel_cmd, previous_accel - rate_down)
+      accel_cmd = min(accel_raw, max(accel_cmd, min(previous_accel, 0.0) - rate_down))
 
     return accel_cmd, urgent_stock_brake, params
 
@@ -236,6 +251,12 @@ class CarController(CarControllerBase):
             accel_raw, self._prev_accel_cmd, stock_scaled, CS.out.vEgo, distance_val, self.close_follow_enabled,
           )
           self._prev_accel_cmd = accel_cmd
+
+        if self.close_follow_enabled and distance_val == 1 and not (standstill_request or self.resume):
+          # Match the integer CAN command before choosing brake/drive mode.
+          # Keep fractional ramp state above, and preserve stop/resume flags.
+          # The DBC's integer negative offsets make half steps round upward.
+          accel_cmd = floor(accel_cmd + 0.5)
 
         self._dbg.log({
           "vEgo": round(CS.out.vEgo, 2),

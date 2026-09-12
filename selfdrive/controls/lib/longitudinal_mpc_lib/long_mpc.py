@@ -68,8 +68,16 @@ class LongitudinalFollowProfile(IntEnum):
 
 
 PROTON_X50_FL_FINGERPRINT = "PROTON S70"
-PROTON_X50_FL_ONE_BAR_T_FOLLOW = 0.28
-PROTON_X50_FL_ONE_BAR_STOP_DISTANCE = 2.5
+# Widen the earlier 0.28s / 2.5m tune after reports of an oscillating, shrinking
+# gap. The controller config includes 0.4-0.5s actuator delay. These candidate
+# margins need drive-log validation; their size alone does not prove stability.
+PROTON_X50_FL_ONE_BAR_T_FOLLOW = 0.90
+PROTON_X50_FL_ONE_BAR_STOP_DISTANCE = 4.0
+PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST = 10000.
+# At 90 km/h: 1.02 * 25 + 4.5 = 30m. Three bars takes the old two-bar target.
+PROTON_X50_FL_TWO_BAR_T_FOLLOW = 1.02
+PROTON_X50_FL_TWO_BAR_STOP_DISTANCE = 4.5
+PROTON_X50_FL_THREE_BAR_T_FOLLOW = 1.25
 
 
 def get_follow_profile(car_name, car_fingerprint):
@@ -82,9 +90,10 @@ def is_x50_fl_one_bar(personality, follow_profile):
   return follow_profile == LongitudinalFollowProfile.proton_x50_fl and personality == log.LongitudinalPersonality.aggressive
 
 
-def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
+def get_jerk_factor(personality=log.LongitudinalPersonality.standard, follow_profile=LongitudinalFollowProfile.default):
   if personality==log.LongitudinalPersonality.relaxed:
-    return 1.0
+    # X50 FL three-bar inherits the old two-bar acceleration smoothing too.
+    return 0.5 if follow_profile == LongitudinalFollowProfile.proton_x50_fl else 1.0
   elif personality==log.LongitudinalPersonality.standard:
     return 0.5
   elif personality==log.LongitudinalPersonality.aggressive:
@@ -96,6 +105,11 @@ def get_jerk_factor(personality=log.LongitudinalPersonality.standard):
 def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, follow_profile=LongitudinalFollowProfile.default):
   if is_x50_fl_one_bar(personality, follow_profile):
     return PROTON_X50_FL_ONE_BAR_T_FOLLOW
+  if follow_profile == LongitudinalFollowProfile.proton_x50_fl:
+    if personality == log.LongitudinalPersonality.standard:
+      return PROTON_X50_FL_TWO_BAR_T_FOLLOW
+    elif personality == log.LongitudinalPersonality.relaxed:
+      return PROTON_X50_FL_THREE_BAR_T_FOLLOW
   if personality==log.LongitudinalPersonality.relaxed:
     return 1.40
   elif personality==log.LongitudinalPersonality.standard:
@@ -109,6 +123,8 @@ def get_T_FOLLOW(personality=log.LongitudinalPersonality.standard, follow_profil
 def get_stop_distance(personality=log.LongitudinalPersonality.standard, follow_profile=LongitudinalFollowProfile.default):
   if is_x50_fl_one_bar(personality, follow_profile):
     return PROTON_X50_FL_ONE_BAR_STOP_DISTANCE
+  if follow_profile == LongitudinalFollowProfile.proton_x50_fl and personality == log.LongitudinalPersonality.standard:
+    return PROTON_X50_FL_TWO_BAR_STOP_DISTANCE
   return STOP_DISTANCE
 
 
@@ -134,9 +150,11 @@ def get_approach_t_follow_boost(v_ego, radarstate, personality=log.LongitudinalP
   if closing_speed < 0.3 and lead_brake < 0.4:
     return 0.0
 
-  # One bar is deliberately close at steady speed. Preserve a temporary margin
-  # only while closing or while the lead is braking.
-  max_boost = 0.58
+  # Limit target movement while closing or when the lead brakes. The speed
+  # boost is continuous at 0.3 m/s; the independent brake boost can also apply
+  # while the lead pulls away. Reducing this cap is a tuning candidate, not
+  # proof that the reported oscillation is resolved.
+  max_boost = 0.20
   speed_boost = np.interp(closing_speed, [0.3, 3.5], [0.0, max_boost])
   brake_boost = np.interp(lead_brake, [0.4, 2.0], [0.0, max_boost * 0.45])
   distance_factor = np.interp(d_rel, [12.0, 50.0], [1.0, 0.0])
@@ -360,11 +378,14 @@ class LongitudinalMpc:
       self.solver.cost_set(i, 'Zl', Zl)
 
   def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
-    jerk_factor = get_jerk_factor(personality)
+    jerk_factor = get_jerk_factor(personality, self.follow_profile)
     if self.mode == 'acc':
       a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
       cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
-      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, DANGER_ZONE_COST]
+      # At the shorter one-bar target, penalize using up the gap before a late
+      # stop is needed. Keep the acceleration/jerk smoothing costs unchanged.
+      danger_zone_cost = PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST if is_x50_fl_one_bar(personality, self.follow_profile) else DANGER_ZONE_COST
+      constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_zone_cost]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0
       cost_weights = [0., 0.1, 0.2, 5.0, a_change_cost, 1.0]
@@ -466,7 +487,10 @@ class LongitudinalMpc:
 
     # Update in ACC mode or ACC/e2e blend
     if self.mode == 'acc':
-      self.params[:,5] = LEAD_DANGER_FACTOR
+      # The normal 0.75 factor permits undershooting the desired gap. One bar
+      # has less spare distance, so start the stronger penalty at its full
+      # target. This is still a soft constraint, not a collision guarantee.
+      self.params[:,5] = 1.0 if is_x50_fl_one_bar(personality, self.follow_profile) else LEAD_DANGER_FACTOR
 
       # Fake an obstacle for cruise, this ensures smooth acceleration to set speed
       # when the leads are no factor.

@@ -173,6 +173,126 @@ def test_non_close_modes_keep_release_stock_blend():
     assert not urgent
 
 
+def test_one_bar_does_not_delay_planned_braking():
+  # The camera planner can see a slowdown before stock ACC asks for a deep
+  # brake. Its request must not wait for the previous throttle to ramp down.
+  for v_ego in (0.0, 10.0, 25.0, 33.0):
+    for previous_accel in (0.0, 12.0, 24.0, -1.0):
+      for accel_raw in (-0.18, -3.6, -18.0, -54.0):
+        command, urgent, _ = CarController.blend_longitudinal_command(
+          accel_raw, previous_accel, -4.0, v_ego, 1, True,
+        )
+        assert command <= accel_raw
+        assert not urgent  # No stock override was needed to honor the planner.
+
+
+def test_one_bar_follows_gentle_throttle_reduction_and_brake_onset():
+  previous_accel = 12.0
+  # A smooth two-second slowdown must remain smooth at the CAN output while
+  # removing the delay on faster brake requests.
+  for frame in range(1, 101):
+    accel_raw = 12.0 - frame * 0.15
+    command, _, _ = CarController.blend_longitudinal_command(
+      accel_raw, previous_accel, 0.0, 25.0, 1, True,
+    )
+    assert isclose(command, accel_raw, abs_tol=1e-9)
+    previous_accel = command
+
+
+def test_one_bar_cuts_throttle_when_coasting_is_requested():
+  command, _, _ = CarController.blend_longitudinal_command(0.0, 12.0, 0.0, 25.0, 1, True)
+  assert command == 0.0
+
+
+def test_one_bar_stock_brake_starts_without_waiting_for_throttle_ramp():
+  command, urgent, params = CarController.blend_longitudinal_command(12.0, 12.0, -10.0, 0.0, 1, True)
+  assert command == -params.stock_brake_rate
+  assert not urgent
+
+
+def test_one_bar_does_not_extend_a_brief_planned_brake():
+  for v_ego in (0.0, 10.0, 25.0, 33.0):
+    for brake_request in (-3.6, -18.0, -54.0):
+      command, _, _ = CarController.blend_longitudinal_command(brake_request, 0.0, 0.0, v_ego, 1, True)
+      assert command == brake_request
+      command, _, _ = CarController.blend_longitudinal_command(0.0, command, 0.0, v_ego, 1, True)
+      assert command == 0.0, "braking continued after both controllers cleared their requests"
+
+
+def test_one_bar_follows_planned_brake_release_without_adding_a_tail():
+  command = -18.0
+  for accel_raw in (-12.0, -6.0, -3.0, 0.0):
+    command, _, _ = CarController.blend_longitudinal_command(accel_raw, command, 0.0, 25.0, 1, True)
+    assert command == accel_raw
+
+
+def test_one_bar_still_limits_throttle_after_releasing_brakes():
+  for v_ego in (0.0, 10.0, 25.0, 33.0):
+    command, _, params = CarController.blend_longitudinal_command(12.0, 0.0, 0.0, v_ego, 1, True)
+    assert command == params.throttle_rate
+
+    previous_accel = -18.0
+    for _ in range(100):
+      command, _, params = CarController.blend_longitudinal_command(12.0, previous_accel, 0.0, v_ego, 1, True)
+      if previous_accel < 0.0:
+        assert command == 0.0  # Release the brake before ramping positive throttle.
+      else:
+        assert command - previous_accel <= params.throttle_rate + 1e-9
+      previous_accel = command
+
+
+def test_one_bar_retains_stock_brake_floor_during_planned_release():
+  command, urgent, params = CarController.blend_longitudinal_command(0.0, -18.0, -16.0, 25.0, 1, True)
+  assert not urgent
+  assert command == -18.0 + params.brake_release_rate
+  assert command < 0.0
+
+
+def test_one_bar_release_at_stock_threshold_and_adjacent_integer_commands():
+  v_ego = 25.0
+  params = CarController.get_long_blend_params(v_ego, 1, True)
+  for stock_scaled in (params.stock_brake_threshold - 0.01, params.stock_brake_threshold, params.stock_brake_threshold + 0.01):
+    command, _, _ = CarController.blend_longitudinal_command(-6.0, -18.0, stock_scaled, v_ego, 1, True)
+    assert command <= -6.0  # Never release past the remaining planned brake.
+
+  # Stock CMD is an integer before speed scaling. Exercise both neighboring
+  # values across the threshold, including a renewed brake after release.
+  mult = proton_carcontroller.interp(v_ego, [0.0, 28.3], [1.0, 0.6])
+  command, _, _ = CarController.blend_longitudinal_command(0.0, -18.0, -22 * mult, v_ego, 1, True)
+  assert command < 0.0
+  command, _, _ = CarController.blend_longitudinal_command(0.0, command, -21 * mult, v_ego, 1, True)
+  assert command == 0.0
+  command, _, _ = CarController.blend_longitudinal_command(12.0, command, -22 * mult, v_ego, 1, True)
+  assert command < 0.0
+
+
+def test_non_close_modes_keep_release_blend_across_brake_transitions():
+  for distance_val, close_follow_enabled in ((2, True), (3, True), (1, False)):
+    for v_ego in (0.0, 2.49, 2.5, 10.0, 25.0):
+      for previous_accel in (-30.0, 0.0, 24.0):
+        for accel_raw in (-54.0, -3.6, 0.0, 12.0):
+          for stock_scaled in (-30.0, -4.0, 0.0, 12.0):
+            command, _, _ = CarController.blend_longitudinal_command(
+              accel_raw, previous_accel, stock_scaled, v_ego, distance_val, close_follow_enabled,
+            )
+            expected = (stock_scaled + accel_raw) / 2.0 if v_ego < 2.5 else min(stock_scaled, accel_raw)
+            assert command == expected
+
+
+def test_controller_update_emits_planned_brake_on_first_can_frame():
+  controller, car_control, car_state = make_controller_update_state(stock_acc_cmd=0.0)
+  controller._prev_accel_cmd = 12.0
+  car_control.actuators.accel = -1.0
+  car_state.out.vEgo = 25.0
+
+  with patch.object(proton_carcontroller, "create_can_steer_command", return_value="steer"), \
+       patch.object(proton_carcontroller, "create_acc_cmd", return_value="acc") as create_acc:
+    new_actuators, _ = controller.update(car_control, car_state, 0)
+
+  assert create_acc.call_args.args[1] == -18.0
+  assert new_actuators.accel == -1.0
+
+
 def test_controller_update_emits_urgent_stock_brake_without_rate_limit():
   controller, car_control, car_state = make_controller_update_state()
 
@@ -199,11 +319,13 @@ def test_stock_brake_threshold_stays_below_gap_nagging():
     assert params.hard_override <= params.stock_brake_threshold - 6.0
 
 
-def test_only_x50_fl_one_bar_gets_fast_sng_resume():
+def test_sng_resume_delays_are_scoped_to_x50_fl_bars():
   assert get_sng_resume_delay_frames(1, close_follow_enabled=True) == 50
-  assert get_sng_resume_delay_frames(2, close_follow_enabled=True) == 310
+  assert get_sng_resume_delay_frames(2, close_follow_enabled=True) == 150
   assert get_sng_resume_delay_frames(3, close_follow_enabled=True) == 310
   assert get_sng_resume_delay_frames(1, close_follow_enabled=False) == 310
+  assert get_sng_resume_delay_frames(2, close_follow_enabled=False) == 310
+  assert get_sng_resume_delay_frames(3, close_follow_enabled=False) == 310
 
 
 def test_stronger_stopping_params_are_s70_platform_only():
@@ -216,20 +338,17 @@ def test_stronger_stopping_params_are_s70_platform_only():
   assert isclose(pre_fl_params.stoppingDecelRate, 0.3, abs_tol=1e-6)
 
 
-def test_controller_update_uses_fast_sng_resume_only_for_one_bar():
+def test_controller_update_waits_for_each_bars_resume_delay():
   with patch.object(proton_carcontroller, "create_can_steer_command", return_value="steer"), \
        patch.object(proton_carcontroller, "create_acc_cmd", return_value="acc"), \
        patch.object(proton_carcontroller, "send_buttons", return_value="resume") as send_buttons:
-    controller, car_control, car_state = make_controller_update_state(stock_acc_cmd=0.0, cruise_standstill=True)
-    for frame in range(51):
-      controller.update(car_control, car_state, frame)
+    for distance_bar, expected_frame in ((1, 50), (2, 150), (3, 310)):
+      send_buttons.reset_mock()
+      controller, car_control, car_state = make_controller_update_state(distance_val=distance_bar, stock_acc_cmd=0.0, cruise_standstill=True)
+      for frame in range(expected_frame):
+        controller.update(car_control, car_state, frame)
+      send_buttons.assert_not_called()
 
-    assert send_buttons.call_count == 1
-    assert send_buttons.call_args.args[1] == 0
-
-    send_buttons.reset_mock()
-    controller, car_control, car_state = make_controller_update_state(distance_val=2, stock_acc_cmd=0.0, cruise_standstill=True)
-    for frame in range(51):
-      controller.update(car_control, car_state, frame)
-
-    send_buttons.assert_not_called()
+      controller.update(car_control, car_state, expected_frame)
+      send_buttons.assert_called_once()
+      assert send_buttons.call_args.args[1] == 0

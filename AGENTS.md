@@ -369,7 +369,7 @@ modeld (20Hz) → radarState (leads) → longitudinal_planner.py (20Hz)
                                               │
                                     carcontroller.py (50Hz)
                                      ├── scale: ×15 throttle / ×18 brake
-                                     ├── 1-bar speed-based throttle/brake rate limits
+                                     ├── 1-bar throttle ramp; planned brake onset/release pass through
                                      ├── 1 bar: custom close-follow stock blend
                                      └── 2/3 bar: original release stock blend
                                               │
@@ -389,32 +389,44 @@ modeld (20Hz) → radarState (leads) → longitudinal_planner.py (20Hz)
 **Follow Distance** (`long_mpc.py`):
 | X50 FL / S70 bar | Personality | T_FOLLOW | Effective stop gap | Gap at 90 km/h |
 |------------------|-------------|----------|--------------------|----------------|
-| 1 | Aggressive | 0.28s | 2.5m | 9.5m |
-| 2 | Standard | 1.25s | 5.5m | 36.75m |
-| 3 | Relaxed | 1.40s | 5.5m | 40.5m |
+| 1 | Aggressive | 0.90s | 4.0m | 26.5m |
+| 2 | Standard | 1.02s | 4.5m | 30.0m |
+| 3 | Relaxed (old 2-bar smoothing) | 1.25s | 5.5m | 36.75m |
 
 Other platforms retain the stable 1.20s / 1.25s / 1.40s personality values and the 5.5m stop gap.
+
+**Do not lower the one-bar values below 0.85s / 3.5m.** An earlier tune used
+0.28s with a 2.5m stop gap, giving a 9.5m target and 0.38s of headway at
+90 km/h. On the road it did not settle: the gap oscillated and ratcheted closed
+until the driver had to intervene. The Proton configuration specifies
+0.4–0.5s actuator delay. Camera delay and control response also affect the loop;
+their combined effect has not been measured from this drive.
+`test_one_bar_headway_keeps_minimum_candidate_margin` guards at least 1.0s of
+headway from 30 to 110 km/h. That arithmetic check does not prove stability;
+`test_proton_longitudinal.py` separately tests the real control code with an
+approximate delayed car model. Road validation is still required.
 
 **MPC Constants** (`long_mpc.py`):
 | Param | Value | Effect |
 |-------|-------|--------|
-| `STOP_DISTANCE` | 5.5m | Generated-solver baseline; 1 bar uses a scoped 3.0m obstacle offset for an effective 2.5m gap |
+| `STOP_DISTANCE` | 5.5m | Generated-solver baseline; scoped obstacle offsets are 1.5m for bar 1 and 1.0m for bar 2, giving 4.0m / 4.5m effective stop targets |
 | `COMFORT_BRAKE` | 2.5 m/s² | Comfortable decel for gap calc |
 | `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
+| One-bar gap penalty | Factor 1.0, cost 10000 | Starts at the full target; other ACC profiles keep factor 0.75, cost 100. Still a soft constraint |
 | `LEAD_PERSIST_FRAMES` | 60 | X50 FL ghost lead for 3s at the 20Hz planner rate |
 
 **Rate Limiter** (`carcontroller.py`):
 | Direction | Per frame (50Hz) | Per second |
 |-----------|-----------------|-----------|
 | Throttle | +0.25 at 0 m/s to +0.40 at 33 m/s | +12.5/s to +20/s |
-| Ordinary brake | -0.5 CAN units | -25/s |
+| Planned slowdown / brake | Immediate requested decrease | No added controller delay |
 | 1-bar stock brake blend | -0.45 to -0.85; urgent is immediate | Speed-dependent |
 
 **Stock Blending** (`carcontroller.py`):
 - X50 FL / S70 1 bar: mild stock gap-nagging does not suppress throttle; real braking blends below a speed-dependent -8 to -14 CAN threshold.
 - X50 FL / S70 1 bar: urgent stock braking passes through immediately at the speed-dependent -16 to -22 CAN hard override.
 - Bars 2/3 and other Proton platforms retain the original low-speed average and road-speed stock cap.
-- Stop-and-go automatic RES delay is 0.5s for X50 FL / S70 1 bar and 3.1s otherwise.
+- X50 FL / S70 stop-and-go automatic RES delays are 0.5s / 1.5s / 3.1s for bars 1 / 2 / 3. Other platforms keep 3.1s.
 
 **X50 FL / S70 stopping** (`interface.py`):
 | Param | X50 FL / S70 | Other Proton platforms |
@@ -437,24 +449,53 @@ elif not x50_fl_one_bar:
 
 | # | Objective | Status |
 |---|-----------|--------|
-| 1 | One-bar-only close follow | ✅ 0.28s + effective 2.5m stop gap; device validation pending |
-| 2 | Keep bars 2/3 far | ✅ Restored stable 1.25s / 1.40s targets |
+| 1 | One-bar-only close follow | ⚠️ 0.28s + 2.5m was road-tested and rejected: the gap oscillated and ratcheted closed. Now 0.90s + 4.0m (26.5m at 90 km/h); device validation pending |
+| 2 | Ordered bar targets | Bar 2: 30m at 90 km/h, 4.5m stop target, 1.5s resume; bar 3 takes old bar 2 settings. Local candidate; device validation pending |
 | 3 | Responsive traffic-jam resume | ✅ 0.5s one-bar automatic RES; device validation pending |
 | 4 | Stable camera lead | ✅ Relative-motion persistence for 60 frames / 3s; replay validation pending |
 | 5 | Curve speed | ❌ Removed by user request |
 
 ### Tuning Lessons
 
-1. **Rate limiter > accel ceiling** for comfort — don't lower A_CRUISE_MAX, use rate limiter
+1. **Avoid added delay on planned braking** — retain the throttle ramp and stock brake blend; the planned brake request controls both onset and release
 2. **Change one parameter per test** — T_FOLLOW + accel + rate limiter are coupled
 3. **Add instrumentation first** — debug logger should be commit 1, not commit 4
 4. **Keep a stock brake safety layer** — ignore only mild one-bar gap nagging; blend real braking and retain the hard override
 5. **Camera-only needs correctly timed lead persistence** — use relative motion and the real 20Hz planner interval
 6. **Asymmetric rates** — bounded throttle and faster braking match human expectations
-7. **Boost only while approaching** — steady one-bar stays close; closing speed or lead braking temporarily adds margin
-8. **One bar is the only custom mode** — bars 2/3 and non-X50-FL profiles keep stable targets and stock blending
-9. **One-bar rate limiting damps MPC oscillation** — bounded ordinary commands prevent hunting, while urgent stock braking bypasses the limiter
+7. **Limit approach-target movement** — the boost responds to closing speed or lead braking. Its interpolation is continuous at the closing-speed threshold. The 0.20s cap reduces target movement, but has not been proved to resolve the reported road oscillation
+8. **Custom stock blending stays one-bar-only** — the user changed X50 FL bar 2/3 gap and resume settings on 2026-09-10. Their stock blend stays original; other vehicle profiles stay unchanged
+9. **Do not delay or prolong planned braking** — pass planned brake onset and release through. Return to zero before ramping positive throttle. Smooth stock brake release only while stock still requests braking below its threshold; urgent stock braking stays immediate
 10. **User wants one bar close and responsive** — traffic-jam and moving follow use the same isolated custom profile
+11. **Do not retune closer from gap maths alone** — the earlier 0.38s headway was associated with reported shrinking-gap oscillation. Keep the candidate margin until recorded-drive and delayed-loop evidence supports any further tuning; a numeric headway alone is not a stability guarantee
+12. **Stock ACC opinion is a gap preference, not a hazard signal** — its command tracks closing speed, and `aLeadK` reads 0.00 on this camera-only car. Never let it gate throttle; use it only as a deep brake floor
+
+### Local one-bar following fixes — 2026-09-05
+
+- Reproduced in `CarController.blend_longitudinal_command`: a -18 CAN brake request after +12 CAN throttle kept positive throttle for 0.46s, with output still only -13 CAN after 1s.
+- One bar now passes planned brake onset and release through. A one-frame planned brake no longer gains a 480ms release tail. Positive throttle resumes through zero and retains its ramp. Active stock braking still limits release, and urgent stock braking stays immediate. Bars 2/3 keep the release blend.
+- Tiny negative commands such as -0.1 CAN encoded as zero but still selected brake mode. Moving one-bar commands now choose motion mode after matching CAN integer rounding; fractional throttle state and stop/resume flags remain unchanged. Native tests check all three encoded command signals around zero. Actual brake-light behavior remains unverified.
+- The native delayed-loop test exposed a simulated collision when a lead stopped from 5 m/s at 1 m/s² with `aLeadK=0`. One-bar ACC now penalizes using the full target gap (factor 1.0, cost 10000), instead of starting at 75% of the target with cost 100. The same case now retains about 3.85m. Other profiles and acceleration/jerk smoothing costs are unchanged.
+- Native validation runs in an isolated ARM Linux container on the Mac, using the existing generated MPC solver plus the real Proton PID and CAN packer/parser. All 88 focused tests pass, covering brake onset/release, stock-threshold crossings, packed motion-mode flags, steady follow, lead slowdown/stops, no-lead cruise and camera dropout. Unexpected solver resets fail the simulation.
+- The stronger gap penalty can slow catch-up after a lead slowdown. The test checks convergence over 100s and braking during the slowdown. Broader stop cases retain as little as about 1.73m, so this is not a guarantee of holding the nominal 4m gap or avoiding every collision.
+- The simulated car uses a linear CAN-to-acceleration mapping, 0.4/0.5s command delay, 0.15s response time and 0.1s lead-sensor delay. It assumes zero stock commands in the dynamic cases; separate controller tests cover stock blending. These assumptions have not been fitted to drive logs and do not prove brake-light behavior or road safety.
+- The existing 0.90s / 4.0m one-bar gap changes remain a candidate awaiting device validation. The dongle is unreachable; no deployment was performed.
+
+### Local bar 2/3 changes — 2026-09-10
+
+- User requested bar 2 targets of 30m at 90 km/h, 4.5m at a stop, and 1.5s automatic resume. This uses `T_FOLLOW=1.02s`: `25 m/s × 1.02s + 4.5m = 30m` at equal lead/ego speeds.
+- Bar 3 takes the old bar 2 settings: 1.25s follow time, 5.5m stop target, 36.75m at 90 km/h, 3.1s resume, and the old standard acceleration smoothing factor of 0.5.
+- Scoped to X50 FL / S70. Bar 1, other vehicle profiles, stock braking/blending, and the one-bar-only stronger gap penalty are unchanged.
+- One bar can temporarily ask for more space than bar 2 during an approach. Preserve that extra margin; do not lower the one-bar boost to force bar order. Steady-speed targets remain ordered.
+- Regression checks cover native MPC follow-time and obstacle-offset inputs, smoothing costs, exact automatic-resume frames, and the Following Lab target display. The existing delayed one-bar tests still run. The simulator holds stock ACC at zero, so it cannot validate real bar 2/3 catch-up or resume behavior.
+- Validation: 114 tests passed (90 controller/planner tests plus 24 Following Lab tests). Syntax and whitespace checks pass; lint reports only the four existing findings.
+- No commit, push, or dongle deployment was performed. These are target settings, not guaranteed road gaps.
+
+Run the focused native suites on a supported Linux runtime:
+
+```bash
+python -m pytest selfdrive/car/tests/test_proton_following.py selfdrive/controls/tests/test_following_distance.py selfdrive/controls/tests/test_proton_longitudinal.py -q -n0 -W ignore::ResourceWarning
+```
 
 ## Project Structure (Key Directories)
 ```
