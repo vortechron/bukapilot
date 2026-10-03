@@ -82,6 +82,14 @@ PROTON_X50_FL_ONE_BAR_STOP_DISTANCE = 4.0
 # small, brief shortfalls pass with gentle braking.
 PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST = 2000.
 PROTON_X50_FL_ONE_BAR_DANGER_FACTOR = 1.0
+# Weak gap tracking lets a slowdown turn into speed undershoot and a long
+# recovery. Give tracking more weight while retaining the original acceleration
+# and jerk smoothing: reducing those costs sharpened braking on lead acquisition.
+PROTON_X50_FL_ONE_BAR_TRACKING_COST = 50.
+# The 2000 penalty undershot the stop margin in the delayed low-speed test.
+# Restore the earlier stop penalty progressively below 10 m/s, without changing
+# the moving-road penalty or the 4m target. This remains a soft constraint.
+PROTON_X50_FL_ONE_BAR_STOP_DANGER_ZONE_COST = 10000.
 # The boost grows the target while closing, which the driver felt as braking
 # harder than the lead and dropping back. Halved from 0.20s after road feedback.
 PROTON_X50_FL_ONE_BAR_MAX_APPROACH_BOOST = 0.10
@@ -390,11 +398,16 @@ class LongitudinalMpc:
   def set_weights(self, prev_accel_constraint=True, personality=log.LongitudinalPersonality.standard):
     jerk_factor = get_jerk_factor(personality, self.follow_profile)
     if self.mode == 'acc':
+      one_bar = is_x50_fl_one_bar(personality, self.follow_profile)
       a_change_cost = A_CHANGE_COST if prev_accel_constraint else 0
-      cost_weights = [X_EGO_OBSTACLE_COST, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
+      tracking_cost = PROTON_X50_FL_ONE_BAR_TRACKING_COST if one_bar else X_EGO_OBSTACLE_COST
+      cost_weights = [tracking_cost, X_EGO_COST, V_EGO_COST, A_EGO_COST, jerk_factor * a_change_cost, jerk_factor * J_EGO_COST]
       # At the shorter one-bar target, penalize using up the gap before a late
-      # stop is needed. Keep the acceleration/jerk smoothing costs unchanged.
-      danger_zone_cost = PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST if is_x50_fl_one_bar(personality, self.follow_profile) else DANGER_ZONE_COST
+      # stop is needed, independently of the tracking/smoothing costs above.
+      danger_zone_cost = DANGER_ZONE_COST
+      if one_bar:
+        danger_zone_cost = float(np.interp(self.x0[1], [0.0, 10.0],
+                                          [PROTON_X50_FL_ONE_BAR_STOP_DANGER_ZONE_COST, PROTON_X50_FL_ONE_BAR_DANGER_ZONE_COST]))
       constraint_cost_weights = [LIMIT_COST, LIMIT_COST, LIMIT_COST, danger_zone_cost]
     elif self.mode == 'blended':
       a_change_cost = 40.0 if prev_accel_constraint else 0

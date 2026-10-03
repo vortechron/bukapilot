@@ -1,6 +1,7 @@
-from cereal import car
+from cereal import car, log
 from openpilot.common.numpy_fast import clip, interp
 from openpilot.common.realtime import DT_CTRL
+from openpilot.selfdrive.car.proton.values import CAR as PROTON
 from openpilot.selfdrive.controls.lib.drive_helpers import CONTROL_N, apply_deadzone
 from openpilot.selfdrive.controls.lib.pid import PIDController
 from openpilot.selfdrive.modeld.constants import ModelConstants
@@ -53,6 +54,7 @@ def long_control_state_trans(CP, active, long_control_state, v_ego, v_target,
 class LongControl:
   def __init__(self, CP):
     self.CP = CP
+    self.proton_x50_fl = CP.carName == 'proton' and CP.carFingerprint == PROTON.S70
     self.long_control_state = LongCtrlState.off  # initialized to off
     self.pid = PIDController((CP.longitudinalTuning.kpBP, CP.longitudinalTuning.kpV),
                              (CP.longitudinalTuning.kiBP, CP.longitudinalTuning.kiV),
@@ -65,7 +67,7 @@ class LongControl:
     self.pid.reset()
     self.v_pid = v_pid
 
-  def update(self, active, CS, long_plan, accel_limits, t_since_plan):
+  def update(self, active, CS, long_plan, accel_limits, t_since_plan, experimental_mode=False):
     """Update longitudinal control. This updates the state machine and runs a PID loop"""
     # Interp control trajectory
     speeds = long_plan.speeds
@@ -81,6 +83,13 @@ class LongControl:
 
       v_target = min(v_target_lower, v_target_upper)
       a_target = min(a_target_lower, a_target_upper)
+
+      if self.proton_x50_fl and not experimental_mode and long_plan.personality == log.LongitudinalPersonality.aggressive:
+        # The delay projection assumes constant jerk. When braking rises then
+        # levels off, it can invent stronger braking than any point in the plan.
+        # Keep feedforward within the planned range; PID feedback and the stock
+        # brake override remain free to ask for more braking when needed.
+        a_target = clip(a_target, min(long_plan.accels), max(long_plan.accels))
 
       v_target_1sec = interp(self.CP.longitudinalActuatorDelayUpperBound + t_since_plan + 1.0, ModelConstants.T_IDXS[:CONTROL_N], speeds)
     else:

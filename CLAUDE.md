@@ -442,7 +442,8 @@ approximate delayed car model. Road validation is still required.
 | `STOP_DISTANCE` | 5.5m | Generated-solver baseline; scoped obstacle offsets are 1.5m for bar 1 and 1.0m for bar 2, giving 4.0m / 4.5m effective stop targets |
 | `COMFORT_BRAKE` | 2.5 m/s² | Comfortable decel for gap calc |
 | `A_CHANGE_COST` | 200 | Smoothness (high = delays braking onset) |
-| One-bar gap penalty | Factor 1.0, cost 2000 | Starts at the full target; other ACC profiles keep factor 0.75, cost 100. Still a soft constraint. Was 10000 until 2026-09-12 drive logs showed it caused chase/brake cycling |
+| One-bar gap tracking | Cost 50 (other ACC profiles: 3) | Reduces speed undershoot and slow catch-up; original acceleration and jerk smoothing retained |
+| One-bar gap penalty | Factor 1.0; cost 10000 at 0 m/s, falling linearly to 2000 at 10 m/s and above | Starts at the full target. Stronger low-speed stop margin; road-speed cost stays 2000. Other ACC profiles keep factor 0.75, cost 100. Still a soft constraint |
 | `LEAD_PERSIST_FRAMES` | 60 | X50 FL ghost lead for 3s at the 20Hz planner rate |
 
 **Rate Limiter** (`carcontroller.py`):
@@ -530,6 +531,26 @@ elif not x50_fl_one_bar:
 - Road drive on 0.81s / boost 0.10 (commit 96baf78f1): overall better, but a chase / brake / far / chase cycle while catching up. Log analysis of 943s of engaged one-bar following: 1821 of 1912 hard-brake samples while the gap was still >2m beyond the steady target were planner requests, only 91 came from the stock blend. Median steady excess during hard braking was 3.1m, median predicted shortfall into the required gap only 1.3m, `aLeadK` was 0 in every sample. Cause: the factor 1.0 / cost 10000 wall turns small lead speed dips into 0.8-1.6 m/s² brakes. Cost lowered to 2000; factor, follow time, stop gap and boost unchanged. Not simulated; road validation required.
 - The 0.10s boost with the unchanged penalty was not simulated. The focused native suites were not run on this Mac (Linux ARM binary gap above). Road validation required; revert the boost first if slowdowns feel late.
 
+### Local one-bar recovery candidate — 2026-09-30
+
+- User reports harsh slowdowns and slow re-follow; the current gap is good. Worked without new drive logs, as requested. Reproduced speed undershoot and excess recovery gap with the real Proton planner, generated MPC solver, PID and CAN pack/parser on this Mac.
+- Increased one-bar ACC gap-tracking cost from 3 to 50. Kept follow time 0.81s, stop target 4.0m, approach boost 0.10s, acceleration/jerk smoothing, throttle ramp and stock brake blending. Bars 2/3, other platforms and blended mode keep their costs.
+- The old tune failed the existing 5 m/s lead-stop test: minimum gap 3.437m versus its >3.5m guard. Restore the stronger stop penalty gradually below 10 m/s (10000 at zero, 2000 at 10 m/s and above). Set the MPC state before choosing these speed-dependent costs, including on the first frame.
+- With 0.5s actuator delay, a 25 → 23 → 25 m/s lead dip leaves at most 3.208m extra recovery gap versus 7.427m before. Ego first returns within 0.1 m/s of the lead 1.48s after the lead recovers, versus 2.93s. Approaching a 15 m/s lead from 90m at 25 m/s, then following its acceleration to 18 m/s, cuts those figures from 7.358m / 2.95s to 3.667m / 1.38s.
+- Braking comfort is not established: the mild dip's peak deceleration falls slightly (1.125 → 1.099 m/s²), but peak rate of acceleration change rises (1.362 → 1.502 m/s³). The approach's first command stays -2.889 m/s². Reducing smoothing was rejected because it sharpened that first command.
+- Validation: 102 tests and 3 subtests passed natively on macOS; focused Ruff and whitespace checks passed. Added recovery, repeated-slowdown, camera-speed-noise and initial-brake guards at 0.4/0.5s actuator delay. Existing stop/collision tests were not relaxed.
+- The delayed car model is approximate, has not been fitted to drive logs and holds stock ACC at zero; separate controller tests cover stock blending. These results do not prove road comfort or safety. No commit, push or deployment.
+
+### Local one-bar brake-conversion review — 2026-10-02
+
+- Review reproduced a missed brake-onset spike in both first engagement and lead acquisition after cruising. The old command-step test omitted the jump from zero to its first sample.
+- Cause: `LongControl` projects future acceleration from speed assuming constant jerk. When a planned brake curve rises and then levels off, that projection can exceed every acceleration in the plan (about -1.9 m/s² planned became -2.9 m/s² requested).
+- Bound this feedforward term to the plan's acceleration range for S70/X50 FL one-bar ACC only. Speed-error feedback is added afterward and may still demand more braking; full planned braking, stock override, output limits, brake release and throttle ramp stay intact. Production `controlsd` forwards experimental mode so that mode and all other profiles retain their old conversion.
+- With the same approximate 0.5s delayed model, acquiring a 15 m/s lead at 90m after cruising at 25 m/s reduces the first command from -3.000 to -1.889 m/s² and peak acceleration-change rate from 18.750 to 11.806 m/s³ (about 37%). Cold acquisition improves from -2.889 / 18.056 to -1.833 / 11.458.
+- Mild speed-dip jerk falls from 1.502 to 1.376 m/s³. Recovery stays about 1.5s and extra gap about 3.3m. Peak braking changes from 1.099 to 1.106 m/s²; the peak test now permits one CAN brake step (1/18 m/s²) around its old 1.1 bound and adds a stricter actual-jerk guard. The stronger sustained slowdown is not uniformly smoother (peak jerk 2.765 → 2.801 m/s³).
+- Added warm acquisition, onset-inclusive jerk, camera-distance error, profile/mode exclusion, full planned braking and speed-feedback authority tests. Existing stop/collision assertions were not relaxed. Native Mac validation: 122 tests and 3 subtests pass. Changed control/test modules pass Ruff; `controlsd.py` retains its pre-existing `ALCHelper` import warning (also present at HEAD). Syntax and whitespace checks pass.
+- Existing 0.81s / 4.0m gap, approach boost and September 30 MPC costs are unchanged. Comparisons and plots are in ignored `build/proton-native-macos/review-2026-10-02/`. The native model is not fitted to road logs and dynamic tests hold stock ACC at zero; the distance-error amplitude is synthetic. Softer measured onset is not proof of road comfort or Tesla-equivalent behavior. No dongle access, commit, push or deployment in this review.
+
 Run the focused native suites on this Mac. Do not run them on the dongle and do
 not run them inside a container:
 
@@ -537,12 +558,21 @@ not run them inside a container:
 python -m pytest selfdrive/car/tests/test_proton_following.py selfdrive/controls/tests/test_following_distance.py selfdrive/controls/tests/test_proton_longitudinal.py -q -n0 -W ignore::ResourceWarning
 ```
 
-**Known gap, checked 2026-09-12:** this command does not run on macOS yet. The
-checked-in `openpilot/common/params_pyx.so` is a Linux ARM binary, so the root
-`conftest.py` cannot import it and pytest stops before it collects any test.
-Making the Mac run these suites needs a local macOS build: `tools/mac_setup.sh`,
-then `scons -j4`. Until that build exists, say plainly that the tests were not
-run instead of substituting another runtime.
+**Mac setup, checked 2026-09-30:** this checkout now has local macOS ARM
+bindings and the generated MPC solver, built into ignored
+`build/proton-native-macos/`. ABI-specific module links preserve the tracked
+Linux binaries. On this Mac, run:
+
+```bash
+bash build/proton-native-macos/run-tests.sh
+```
+
+The wrapper runs the three suites above using `.venv`, native macOS acados
+libraries and ZMQ. Its pytest adapter only moves the test scratch directory
+from Linux-only `/dev/shm` into the ignored build directory; it does not mock
+the planner, controller, solver or CAN. These local artifacts are not included
+in git. A fresh checkout still needs a native build and the test-path adapter;
+do not substitute a container or claim tests passed without running them.
 
 ## Project Structure (Key Directories)
 ```
